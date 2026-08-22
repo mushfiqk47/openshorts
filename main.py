@@ -74,8 +74,8 @@ def _openrouter_model() -> str:
     return (
         os.environ.get("OPENROUTER_MODEL")
         or os.environ.get("GEMINI_MODEL")
-        or "meta-llama/llama-3.1-8b-instruct:free"
-    ).strip() or "meta-llama/llama-3.1-8b-instruct:free"
+        or "openrouter/free"
+    ).strip() or "openrouter/free"
 
 # Load environment variables
 load_dotenv()

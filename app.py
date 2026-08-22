@@ -170,8 +170,8 @@ def _resolve_openrouter_model(request: Request) -> str:
     return (
         os.environ.get("OPENROUTER_MODEL")
         or os.environ.get("GEMINI_MODEL")
-        or "meta-llama/llama-3.1-8b-instruct:free"
-    ).strip() or "meta-llama/llama-3.1-8b-instruct:free"
+        or "openrouter/free"
+    ).strip() or "openrouter/free"
 
 
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
@@ -1495,8 +1495,58 @@ async def get_config():
         "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
         "openRouterEnabled": True,
-        "defaultOpenRouterModel": os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free"),
+        "defaultOpenRouterModel": os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
     }
+
+
+# ---- Env-file sync (project follows .env, dashboard writes it) --------------
+import env_manager as _envm
+
+
+@app.get("/api/env")
+async def get_env():
+    """Return the live env file snapshot (secrets masked). The file is the
+    source of truth — a manual edit is returned on the next GET without a
+    restart, and the dashboard's PUT persists through restarts."""
+    # Reload file into process env so a manual edit is seen live (project follows .env)
+    try:
+        from dotenv import load_dotenv as _ld
+        _ld(str(_envm.ENV_PATH), override=True)
+        # If the file changed GPU-relevant keys, drop memoised probes so next
+        # job sees the new value without a restart
+        import ffmpeg_utils as _fu
+        _fu.reset_encoder_cache()
+    except Exception:
+        pass
+    masked, secrets_set, raw = _envm.masked_snapshot()
+    return {
+        "env": masked,
+        "secretsSet": secrets_set,
+        "allowed": sorted(_envm.ALLOWED_ENV),
+        "fileExists": _envm.env_file_exists(),
+        "path": str(_envm.ENV_PATH),
+    }
+
+
+class EnvUpdateBody(BaseModel):
+    updates: Dict[str, Any]
+
+
+@app.put("/api/env")
+async def put_env(body: EnvUpdateBody):
+    raw_updates = {k.strip(): ("" if v is None else str(v)) for k, v in (body.updates or {}).items() if k.strip()}
+    if not raw_updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+    # Only allowlisted keys
+    unknown = [k for k in raw_updates if k not in _envm.ALLOWED_ENV]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Keys not writable via API: {', '.join(unknown)}")
+    errors = _envm.validate_updates(raw_updates)
+    if errors:
+        raise HTTPException(status_code=400, detail={"validation": errors})
+    _envm.apply_updates(raw_updates)
+    masked, secrets_set, raw = _envm.masked_snapshot()
+    return {"ok": True, "env": masked, "secretsSet": secrets_set}
 
 
 # Cache for OpenRouter free models (1 hour). Avoids hammering the API on every settings open.

@@ -3,11 +3,11 @@ import { Key, Eye, EyeOff, Check, RefreshCw, Loader2 } from 'lucide-react';
 import { getApiUrl } from '../config';
 
 const FALLBACK_FREE_MODELS = [
+    "openrouter/free",
     "z-ai/glm-5.2:free",
     "nvidia/nemotron-nano-9b-v2:free",
     "google/gemma-4-26b-a4b-it:free",
     "nvidia/nemotron-nano-12b-v2-vl:free",
-    "liquid/lfm-2.5-2.6b:free",
 ];
 
 export default function KeyInput({ onKeySet, savedKey }) {
@@ -68,11 +68,29 @@ export default function KeyInput({ onKeySet, savedKey }) {
         if (savedKey) setKey(savedKey);
     }, [savedKey]);
 
-    const handleSave = () => {
+    const handleSave = async () => {
         if (key.trim().length > 0) {
             onKeySet(key);
             try {
                 if (isOR) localStorage.setItem('openrouter_model', orModel);
+            } catch {}
+            // Also persist to .env so backend follows the file (project follows env)
+            try {
+                const isORKey = key.trim().startsWith('sk-or-');
+                const updates = {};
+                if (isORKey) {
+                    updates['OPENROUTER_API_KEY'] = key.trim();
+                    updates['OPENROUTER_MODEL'] = orModel;
+                } else if (key.trim().startsWith('AIza')) {
+                    updates['GEMINI_API_KEY'] = key.trim();
+                }
+                if (Object.keys(updates).length) {
+                    await fetch(getApiUrl('/api/env'), {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ updates }),
+                    });
+                }
             } catch {}
             setIsSaved(true);
         }
@@ -90,13 +108,15 @@ export default function KeyInput({ onKeySet, savedKey }) {
                     <h2 className="font-display lowercase text-lg text-ink">AI API Key</h2>
                     <p className="text-xs text-muted -mt-1">Gemini or OpenRouter (free models)</p>
                 </div>
-                {isOR && <span className="ml-auto badge-ok text-xs">OpenRouter</span>}
+                {isOR && <span className="ml-auto px-3 py-1 rounded-full border border-brass bg-paper text-ink text-xs font-mono lowercase tracking-wide">openrouter/free</span>}
                 {isGemini && <span className="ml-auto badge-ok text-xs">Gemini</span>}
             </div>
 
+            <label htmlFor="ai-key-input" className="sr-only">AI API Key</label>
             <div className="flex flex-col sm:flex-row gap-3">
                 <div className="relative sm:flex-1">
                     <input
+                        id="ai-key-input"
                         type={isVisible ? "text" : "password"}
                         value={key}
                         onChange={(e) => {
@@ -105,6 +125,9 @@ export default function KeyInput({ onKeySet, savedKey }) {
                         }}
                         placeholder="sk-or-v1-... (OpenRouter free) or AIza... (Gemini)"
                         className="input-field pr-12 font-mono text-sm"
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-describedby="ai-key-help"
                     />
                     <button
                         onClick={() => setIsVisible(!isVisible)}
@@ -125,22 +148,25 @@ export default function KeyInput({ onKeySet, savedKey }) {
             {isOR && (
                 <div className="mt-3">
                     <div className="flex items-center justify-between gap-2">
-                        <label className="text-xs text-muted">OpenRouter model — auto-detected free ({freeModels.length})</label>
+                        <label htmlFor="openrouter-model-select" className="text-xs text-muted">OpenRouter model — auto-detected free ({freeModels.length})</label>
                         <button
                             type="button"
                             onClick={() => fetchFreeModels(key)}
                             disabled={loadingModels}
-                            className="text-xs text-brass hover:underline flex items-center gap-1 disabled:opacity-50"
+                            className="min-h-[32px] min-w-[44px] px-2 text-xs text-brass hover:underline flex items-center justify-center gap-1 disabled:opacity-50"
                             title="Refresh free model list from OpenRouter"
+                            aria-label="Refresh model list"
                         >
                             {loadingModels ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                             {loadingModels ? 'loading...' : 'refresh'}
                         </button>
                     </div>
                     <select
+                        id="openrouter-model-select"
                         value={orModel}
                         onChange={(e) => { setOrModel(e.target.value); setIsSaved(false); }}
                         className="input-field mt-1 font-mono text-sm"
+                        aria-label="OpenRouter model"
                     >
                         {freeModels.map((m) => (
                             <option key={m} value={m}>{m}</option>
@@ -151,7 +177,7 @@ export default function KeyInput({ onKeySet, savedKey }) {
                 </div>
             )}
 
-            <p className="mt-3 text-xs text-muted leading-relaxed">
+            <p id="ai-key-help" className="mt-3 text-xs text-muted leading-relaxed">
                 Your key is stored locally in your browser (never on the server).
                 {isOR ? (
                     <>

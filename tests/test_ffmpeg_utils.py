@@ -21,13 +21,22 @@ def _clean_encoder_state(monkeypatch):
     reset_encoder_cache()
 
 
-def test_default_args_pin_historical_x264_settings():
+def test_default_args_pin_historical_x264_settings(monkeypatch):
+    # Default is now GPU-first (auto): pin to x264 to verify the historical
+    # CPU args haven't drifted. Also verify auto on CPU falls back to x264.
+    monkeypatch.setenv("FFMPEG_ENCODER", "x264")
+    reset_encoder_cache()
     assert video_encode_args(QUALITY) == [
         "-c:v", "libx264", "-preset", "medium", "-crf", "18"]
     assert video_encode_args(QUALITY_FAST) == [
         "-c:v", "libx264", "-preset", "fast", "-crf", "18"]
     assert video_encode_args(DELIVERY) == [
         "-c:v", "libx264", "-preset", "fast", "-crf", "22"]
+    # auto without GPU -> same as x264
+    monkeypatch.delenv("FFMPEG_ENCODER", raising=False)
+    monkeypatch.setattr(ffmpeg_utils, "_probe_nvenc", lambda: False)
+    reset_encoder_cache()
+    assert video_encode_args(QUALITY)[:2] == ["-c:v", "libx264"]
 
 
 def test_unknown_tier_raises():
@@ -76,7 +85,9 @@ def test_missing_ffmpeg_binary_means_x264(monkeypatch):
     assert video_encode_args(DELIVERY)[:2] == ["-c:v", "libx264"]
 
 
-def test_returns_a_fresh_list_each_call():
+def test_returns_a_fresh_list_each_call(monkeypatch):
+    monkeypatch.setenv("FFMPEG_ENCODER", "x264")
+    reset_encoder_cache()
     first = video_encode_args(QUALITY)
     first.append("-mutated")
     assert "-mutated" not in video_encode_args(QUALITY)
@@ -91,8 +102,10 @@ def test_metadata_scrub_covers_global_and_per_stream():
     assert "-map_metadata:s:a" in METADATA_SCRUB
 
 
-def test_encode_args_stay_free_of_metadata_flags():
+def test_encode_args_stay_free_of_metadata_flags(monkeypatch):
     # The scrub is spliced at call sites, not baked into the codec args — keep
     # video_encode_args a pure codec/quality list.
+    monkeypatch.setenv("FFMPEG_ENCODER", "x264")
+    reset_encoder_cache()
     for tier in (QUALITY, QUALITY_FAST, DELIVERY):
         assert not any(a.startswith("-map_metadata") for a in video_encode_args(tier))

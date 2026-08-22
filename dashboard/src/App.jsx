@@ -1,13 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, PanelLeft, PanelLeftClose, Menu } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 // import Gallery from './components/Gallery';
-import ThumbnailStudio from './components/ThumbnailStudio';
-import SaaShortsTab from './components/SaaShortsTab';
-import UGCGallery from './components/UGCGallery';
+const ThumbnailStudio = lazy(() => import('./components/ThumbnailStudio'));
+const SaaShortsTab = lazy(() => import('./components/SaaShortsTab'));
+const UGCGallery = lazy(() => import('./components/UGCGallery'));
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import ClipEditor from './components/ClipEditor';
 import ReframeEditor from './components/ReframeEditor';
@@ -19,9 +19,10 @@ import TrialUpgradeModal from './components/TrialUpgradeModal';
 import LoginModal from './components/LoginModal';
 import TrialGate from './components/TrialGate';
 import AdvancedBanner from './components/AdvancedBanner';
-import HistoryTab from './components/HistoryTab';
+const HistoryTab = lazy(() => import('./components/HistoryTab'));
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
+import EnvSettings from './components/EnvSettings';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
 import { track } from './lib/analytics';
@@ -545,6 +546,14 @@ function App() {
     setSidebarMobileOpen(false);
   }, [activeTab]);
 
+  // Esc closes mobile drawer
+  useEffect(() => {
+    if (!sidebarMobileOpen) return;
+    const onKey = (e) => { if (e.key === 'Escape') setSidebarMobileOpen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sidebarMobileOpen]);
+
   // For managed users, fetch the durable R2 URLs of the current job's clips so the
   // preview can fall back to them when the local files have been cleaned up.
   useEffect(() => {
@@ -567,6 +576,7 @@ function App() {
     let interval;
     if ((status === 'processing' || status === 'completed') && jobId) {
       interval = setInterval(async () => {
+        if (typeof document !== 'undefined' && document.hidden) return;
         try {
           const data = await pollJob(jobId);
           console.log("Job status:", data);
@@ -836,84 +846,162 @@ function App() {
       ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '06', icon: History, label: 'History' }] : []),
       { id: 'settings', ord: '07', icon: Settings, label: 'Settings' },
     ];
+    const isCollapsed = sidebarCollapsed;
 
     return (
-      <div className="w-20 lg:w-64 bg-paper2 border-r border-rule flex flex-col h-full shrink-0 transition-all duration-300">
-        <a href="#landing" className="p-6 flex items-center gap-3" title="go to landing page">
-          <div className="w-8 h-8 bg-paper3 rounded-input flex items-center justify-center shrink-0 overflow-hidden border border-rule">
-            <img src="/logo-openshorts.png" alt="Logo" className="w-full h-full object-cover" />
-          </div>
-          <span className="font-display lowercase text-lg text-ink hidden lg:block">openshorts</span>
-        </a>
-
-        <nav className="flex-1 px-4 py-4 space-y-1">
-          {navItems.map((item) => {
-            const NavIcon = item.icon;
-            const isActive = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setActiveTab(item.id)}
-                className={`relative w-full flex items-center gap-3 px-3 py-2.5 rounded-input transition-colors ${isActive ? 'bg-paper3 text-ink' : 'text-muted hover:text-ink2 hover:bg-paper3/50'}`}
-              >
-                {isActive && (
-                  <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-brass rounded-full" aria-hidden="true" />
-                )}
-                <NavIcon size={18} className={`shrink-0 ${isActive ? 'text-brass' : ''}`} />
-                <span className="text-sm lowercase hidden lg:block flex-1 text-left truncate">{item.label}</span>
-                {item.byok && <span className="readout hidden lg:block">BYOK</span>}
-                <span className="readout hidden lg:block">{item.ord}</span>
-              </button>
-            );
-          })}
-        </nav>
-
-        <div className="p-4 border-t border-rule space-y-1">
-          <a
-            href="#landing"
-            className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
-          >
-            <Globe size={14} className="shrink-0" />
-            <span className="hidden lg:block truncate">landing page</span>
-          </a>
-          <a
-            href="https://github.com/mutonby/openshorts"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
-          >
-            <svg height="14" viewBox="0 0 16 16" version="1.1" width="14" aria-hidden="true" fill="currentColor" className="shrink-0"><path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
-            <span className="hidden lg:block truncate">open source</span>
-          </a>
-          {billingEnabled && (
-            <a
-              href="#/pricing"
-              className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
-            >
-              <Sparkles size={14} className="shrink-0" />
-              <span className="hidden lg:block truncate">plans &amp; pricing</span>
+      <>
+        {/* Mobile backdrop */}
+        {sidebarMobileOpen && (
+          <div
+            className="fixed inset-0 bg-black/70 z-30 lg:hidden"
+            onClick={() => setSidebarMobileOpen(false)}
+            aria-hidden="true"
+          />
+        )}
+        <div
+          id="app-sidebar"
+          role="navigation"
+          aria-label="Primary navigation"
+          className={`${isCollapsed ? 'lg:w-16' : 'lg:w-64'} w-64 bg-paper2 border-r border-rule flex flex-col h-full shrink-0 transition-all duration-300 ease-in-out fixed lg:static inset-y-0 left-0 z-40 ${sidebarMobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}
+        >
+          <div className={`flex items-center gap-3 shrink-0 ${isCollapsed ? 'p-3 lg:justify-center' : 'p-6'}`}>
+            <a href="#landing" className="flex items-center gap-3 min-w-0" title="go to landing page">
+              <div className="w-8 h-8 bg-paper3 rounded-input flex items-center justify-center shrink-0 overflow-hidden border border-rule">
+                <img src="/logo-openshorts.png" alt="OpenShorts logo" width="32" height="32" className="w-full h-full object-cover" />
+              </div>
+              {!isCollapsed && <span className="font-display lowercase text-lg text-ink hidden lg:block truncate">openshorts</span>}
             </a>
-          )}
-          <a
-            href="mailto:info@openshorts.app"
-            className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
-          >
-            <Mail size={14} className="shrink-0" />
-            <span className="hidden lg:block truncate">info@openshorts.app</span>
-          </a>
+            {/* Desktop collapse toggle */}
+            <button
+              onClick={() => setSidebarCollapsed(!isCollapsed)}
+              className="hidden lg:flex ml-auto w-9 h-9 items-center justify-center rounded-input border border-rule bg-paper text-muted hover:text-ink hover:bg-paper3 transition-colors shrink-0"
+              aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-expanded={!isCollapsed}
+              aria-controls="app-sidebar"
+              title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              {isCollapsed ? <PanelLeft size={14} /> : <PanelLeftClose size={14} />}
+            </button>
+            {/* Mobile close */}
+            <button
+              onClick={() => setSidebarMobileOpen(false)}
+              className="lg:hidden ml-auto w-9 h-9 flex items-center justify-center rounded-input border border-rule bg-paper text-muted hover:text-ink transition-colors shrink-0"
+              aria-label="Close sidebar"
+            >
+              <X size={14} />
+            </button>
+          </div>
+
+          <nav aria-label="Main sections" className={`flex-1 py-4 space-y-1 overflow-y-auto custom-scrollbar ${isCollapsed ? 'px-2' : 'px-4'}`}>
+            {navItems.map((item) => {
+              const NavIcon = item.icon;
+              const isActive = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => setActiveTab(item.id)}
+                  title={isCollapsed ? item.label : undefined}
+                  aria-current={isActive ? 'page' : undefined}
+                  aria-label={item.label}
+                  className={`relative w-full flex items-center rounded-input transition-colors ${isCollapsed ? 'justify-center px-2 py-3' : 'gap-3 px-3 py-2.5'} ${isActive ? 'bg-paper3 text-ink' : 'text-muted hover:text-ink2 hover:bg-paper3/50'}`}
+                >
+                  {isActive && (
+                    <span className={`absolute bg-brass rounded-full ${isCollapsed ? 'left-0 top-1/2 -translate-y-1/2 w-0.5 h-6' : 'left-0 top-1.5 bottom-1.5 w-0.5'}`} aria-hidden="true" />
+                  )}
+                  <NavIcon size={18} className={`shrink-0 ${isActive ? 'text-brass' : ''}`} />
+                  {!isCollapsed && (
+                    <>
+                      <span className="text-sm lowercase flex-1 text-left truncate">{item.label}</span>
+                      {item.byok && <span className="readout">BYOK</span>}
+                      <span className="readout">{item.ord}</span>
+                    </>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className={`border-t border-rule space-y-1 shrink-0 ${isCollapsed ? 'p-2' : 'p-4'}`}>
+            <a
+              href="#landing"
+              title={isCollapsed ? 'landing page' : undefined}
+              className={`flex items-center gap-2 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors ${isCollapsed ? 'justify-center px-1' : 'px-3'}`}
+            >
+              <Globe size={14} className="shrink-0" />
+              {!isCollapsed && <span className="truncate">landing page</span>}
+            </a>
+            <a
+              href="https://github.com/mutonby/openshorts"
+              target="_blank"
+              rel="noopener noreferrer"
+              title={isCollapsed ? 'open source' : undefined}
+              className={`flex items-center gap-2 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors ${isCollapsed ? 'justify-center px-1' : 'px-3'}`}
+            >
+              <svg height="14" viewBox="0 0 16 16" version="1.1" width="14" aria-hidden="true" fill="currentColor" className="shrink-0"><path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+              {!isCollapsed && <span className="truncate">open source</span>}
+            </a>
+            {billingEnabled && !isCollapsed && (
+              <a
+                href="#/pricing"
+                className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
+              >
+                <Sparkles size={14} className="shrink-0" />
+                <span className="truncate">plans &amp; pricing</span>
+              </a>
+            )}
+            {billingEnabled && isCollapsed && (
+              <a
+                href="#/pricing"
+                title="plans & pricing"
+                className="flex items-center justify-center px-1 py-1.5 text-muted hover:text-ink2 transition-colors"
+              >
+                <Sparkles size={14} className="shrink-0" />
+              </a>
+            )}
+            <a
+              href="mailto:info@openshorts.app"
+              title={isCollapsed ? 'info@openshorts.app' : undefined}
+              className={`flex items-center gap-2 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors ${isCollapsed ? 'justify-center px-1' : 'px-3'}`}
+            >
+              <Mail size={14} className="shrink-0" />
+              {!isCollapsed && <span className="truncate">info@openshorts.app</span>}
+            </a>
+          </div>
         </div>
-      </div>
+      </>
     );
   };
 
   return (
     <div className="flex h-screen bg-paper overflow-hidden">
+      <a href="#main-content" className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:px-3 focus:py-2 focus:rounded-input focus:bg-brass focus:text-brassink focus:text-sm">skip to content</a>
       <Sidebar />
 
-      <main className="flex-1 flex flex-col h-full overflow-hidden relative">
+      <main id="main-content" className="flex-1 flex flex-col h-full overflow-hidden relative">
         {/* Top Header */}
-        <header className="h-14 border-b border-rule bg-paper flex items-center justify-between px-6 shrink-0 z-10">
-          <div className="flex items-center gap-4">
+        <header className="h-14 border-b border-rule bg-paper flex items-center justify-between px-4 sm:px-6 shrink-0 z-10">
+          <div className="flex items-center gap-2 sm:gap-4">
+            {/* Mobile: open sidebar */}
+            <button
+              onClick={() => setSidebarMobileOpen(true)}
+              className="lg:hidden w-10 h-10 flex items-center justify-center rounded-input border border-rule bg-paper2 text-muted hover:text-ink transition-colors shrink-0"
+              aria-label="Open sidebar"
+              aria-expanded={sidebarMobileOpen}
+              aria-controls="app-sidebar"
+            >
+              <Menu size={16} />
+            </button>
+            {/* Desktop: toggle collapse when sidebar is in collapsed icon mode */}
+            <button
+              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              className="hidden lg:flex w-10 h-10 items-center justify-center rounded-input border border-rule bg-paper2 text-muted hover:text-ink hover:bg-paper3 transition-colors shrink-0"
+              aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-expanded={!sidebarCollapsed}
+              aria-controls="app-sidebar"
+              title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              {sidebarCollapsed ? <PanelLeft size={16} /> : <PanelLeftClose size={16} />}
+            </button>
             {status !== 'idle' && (
               <button
                 onClick={handleReset}
@@ -1001,7 +1089,7 @@ function App() {
               <span className="font-medium">Session recovered</span>
               <span className="text-muted text-xs">Your previous work has been restored.</span>
             </div>
-            <button onClick={() => setSessionRecovered(false)} className="text-muted hover:text-ink transition-colors">
+            <button onClick={() => setSessionRecovered(false)} className="w-8 h-8 flex items-center justify-center rounded-input text-muted hover:text-ink hover:bg-paper3 transition-colors shrink-0" aria-label="Dismiss">
               <X size={14} />
             </button>
           </div>
@@ -1074,6 +1162,9 @@ function App() {
               ) : (
                 <>
               <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
+              <div className="mt-8">
+                <EnvSettings />
+              </div>
 
               <div className="card p-4 sm:p-6 mt-8 border-dashed opacity-80">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
@@ -1249,7 +1340,9 @@ function App() {
 
           {/* View: SaaS Shorts */}
           {activeTab === 'saasshorts' && (
-            <SaaShortsTab geminiApiKey={apiKey} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
+            <Suspense fallback={<div className="flex items-center justify-center h-full p-8"><Loader2 className="animate-spin text-muted" size={24} aria-label="loading" /></div>}>
+              <SaaShortsTab geminiApiKey={apiKey} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
+            </Suspense>
           )}
 
           {/* View: AI Agent */}
@@ -1370,35 +1463,41 @@ function App() {
 
           {/* View: UGC Gallery */}
           {activeTab === 'ugc-gallery' && (
-            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
-              <div className="max-w-6xl mx-auto p-6 md:p-8">
-                <UGCGallery />
+            <Suspense fallback={<div className="flex items-center justify-center h-full p-8"><Loader2 className="animate-spin text-muted" size={24} aria-label="loading gallery" /></div>}>
+              <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
+                <div className="max-w-6xl mx-auto p-6 md:p-8">
+                  <UGCGallery />
+                </div>
               </div>
-            </div>
+            </Suspense>
           )}
 
           {/* View: History */}
           {activeTab === 'history' && (
-            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
-              <div className="max-w-6xl mx-auto p-6 md:p-8">
-                <HistoryTab onReopenProject={restoreProject} />
+            <Suspense fallback={<div className="flex items-center justify-center h-full p-8"><Loader2 className="animate-spin text-muted" size={24} aria-label="loading history" /></div>}>
+              <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
+                <div className="max-w-6xl mx-auto p-6 md:p-8">
+                  <HistoryTab onReopenProject={restoreProject} />
+                </div>
               </div>
-            </div>
+            </Suspense>
           )}
 
           {activeTab === 'thumbnails' && (
-            <ThumbnailStudio
-              geminiApiKey={apiKey}
-              uploadPostKey={uploadPostKey}
-              uploadUserId={uploadUserId}
-              managed={isManaged}
-              onCreateClips={(sessionId) => {
-                setActiveTab('dashboard');
-                // The Studio source is the user's own upload, published to their
-                // own channel; the handover carries that same attestation.
-                handleProcess({ type: 'thumbnail_session', payload: sessionId, acknowledged: true });
-              }}
-            />
+            <Suspense fallback={<div className="flex items-center justify-center h-full p-8"><Loader2 className="animate-spin text-muted" size={24} aria-label="loading studio" /></div>}>
+              <ThumbnailStudio
+                geminiApiKey={apiKey}
+                uploadPostKey={uploadPostKey}
+                uploadUserId={uploadUserId}
+                managed={isManaged}
+                onCreateClips={(sessionId) => {
+                  setActiveTab('dashboard');
+                  // The Studio source is the user's own upload, published to their
+                  // own channel; the handover carries that same attestation.
+                  handleProcess({ type: 'thumbnail_session', payload: sessionId, acknowledged: true });
+                }}
+              />
+            </Suspense>
           )}
 
           {/* View: Gallery */}
@@ -1476,7 +1575,7 @@ function App() {
                     <span className="readout flex items-center gap-2">
                       <Terminal size={12} /> System Logs
                     </span>
-                    <button onClick={() => setLogsVisible(!logsVisible)} className="text-muted hover:text-ink transition-colors">
+                    <button onClick={() => setLogsVisible(!logsVisible)} className="w-8 h-8 flex items-center justify-center rounded-input text-muted hover:text-ink hover:bg-paper3 transition-colors" aria-label={logsVisible ? 'Collapse logs' : 'Expand logs'} aria-expanded={logsVisible}>
                       {logsVisible ? <ChevronDown size={14} /> : <ChevronDown size={14} className="rotate-180" />}
                     </button>
                   </div>
@@ -1571,7 +1670,7 @@ function App() {
                             try { localStorage.setItem('os_social_nudge_dismissed', '1'); } catch (_) { /* ignore */ }
                           }}
                           aria-label="dismiss"
-                          className="shrink-0 p-1 text-muted hover:text-ink"
+                          className="shrink-0 w-8 h-8 flex items-center justify-center rounded-input text-muted hover:text-ink hover:bg-paper3 transition-colors"
                         >
                           <X size={14} />
                         </button>

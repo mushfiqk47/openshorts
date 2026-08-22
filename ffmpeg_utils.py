@@ -15,7 +15,17 @@ FFMPEG_ENCODER=x264 to pin CPU for debugging or on hosts without a GPU.
 """
 import os
 import subprocess
+import sys
 import threading
+
+# Windows cp1252 can't encode the encoder emoji; force utf-8 for prints
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # Quality tiers pinning the historical libx264 settings.
 QUALITY = "quality"            # was: -preset medium -crf 18

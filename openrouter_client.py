@@ -31,13 +31,15 @@ from typing import Optional, Tuple
 import gemini_worker
 
 
-DEFAULT_MODEL = "z-ai/glm-5.2:free"
+DEFAULT_MODEL = "openrouter/free"
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 # Live free models as of 2026-08-22 (fetched from /api/v1/models, 18 free).
 # The old list (meta-llama:free, gemma-2:free, qwen:free, gpt-oss:free) is now 404 paid-only.
 # This list is the fallback when the live fetch fails; the frontend auto-detects via /api/openrouter/models.
+# openrouter/free is the auto-router (picks a random free model) — validated via web search 2026-08-22 (ormb.naida.ai / openrouter docs).
 FREE_MODELS = [
+    "openrouter/free",
     "z-ai/glm-5.2:free",
     "nvidia/nemotron-nano-9b-v2:free",
     "nvidia/nemotron-nano-12b-v2-vl:free",
