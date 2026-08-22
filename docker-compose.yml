@@ -8,6 +8,17 @@ services:
       - .:/app
       - /app/__pycache__
       - ./output:/app/output
+    # GPU passthrough: when the host has the NVIDIA container runtime,
+    # the backend automatically uses NVENC (encode) + CUDA (decode/Whisper/
+    # YOLO/Parakeet). On CPU-only hosts this reservation is ignored by
+    # Compose v2 (count: 0 when no GPU) and the app falls back to CPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
     restart: unless-stopped
 
   frontend:

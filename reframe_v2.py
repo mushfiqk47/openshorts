@@ -26,7 +26,7 @@ import camera_inset
 import punch_in
 import screencast_layout
 import split_layout
-from ffmpeg_utils import video_encode_args, QUALITY_FAST, METADATA_SCRUB
+from ffmpeg_utils import video_encode_args, QUALITY_FAST, METADATA_SCRUB, hwaccel_decode_args
 
 ANALYSIS_MAX_WIDTH = 640
 
@@ -245,8 +245,9 @@ def _analyze_trajectory(input_video, scenes_boundaries, scene_strategies,
     scale = orig_w / small_w
     frame_bytes = small_w * small_h * 3
 
+    hwaccel = hwaccel_decode_args()
     proc = subprocess.Popen(
-        ["ffmpeg", "-loglevel", "error", "-i", input_video,
+        ["ffmpeg", "-loglevel", "error", *hwaccel, "-i", input_video,
          "-vf", f"scale={small_w}:{small_h}",
          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 4)
@@ -527,9 +528,13 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                     f"scale={out_w}:{out_h},setsar=1[v]"
                 )
 
+            # GPU-first: hwaccel decode is probed; nvenc encode is chosen
+            # by video_encode_args(QUALITY_FAST). When the GPU is absent both
+            # fall back to CPU paths with zero config.
+            dec_args = hwaccel_decode_args()
             _run([
                 "ffmpeg", "-y", "-loglevel", "error",
-                "-ss", f"{ss:.4f}", "-t", f"{dur:.4f}", "-i", input_video,
+                *dec_args, "-ss", f"{ss:.4f}", "-t", f"{dur:.4f}", "-i", input_video,
                 "-filter_complex", graph, "-map", "[v]",
                 *video_encode_args(QUALITY_FAST), "-an", seg_path,
             ])

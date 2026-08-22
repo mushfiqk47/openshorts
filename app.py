@@ -1,6 +1,15 @@
 import os
 import re
 import sys
+
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 import uuid
 import subprocess
 import threading
@@ -108,16 +117,61 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     ``X-Gemini-Key`` header is ignored — an entitled user (active plan or trial)
     gets the managed server key, everyone else gets ``None`` (→ 402, start trial).
     Self-host keeps BYOK: header wins, else the env fallback.
+
+    Also accepts OpenRouter: if X-OpenRouter-Key (or an sk-or-v1-* value in
+    X-Gemini-Key) is present, it is returned as-is and the pipeline will route
+    through OpenRouter. This keeps the dashboard's single key field working.
     """
     if BILLING_ENABLED:
         user = await _user_from_request(request)
         if managed_keys.has_active_entitlement(user):
             return managed_keys.gemini_key()
         return None
-    header = request.headers.get("X-Gemini-Key")
-    if header:
-        return header
+    # Prefer explicit OpenRouter header, then Gemini header (which may hold an OR key)
+    for hdr in ("X-OpenRouter-Key", "X-OpenRouter-API-Key", "X-Gemini-Key"):
+        val = request.headers.get(hdr)
+        if val and val.strip():
+            return val.strip()
+    # Also check OPENROUTER env (so .env with only OPENROUTER_API_KEY works)
+    or_env = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY")
+    if or_env and or_env.strip():
+        return or_env.strip()
     return os.environ.get("GEMINI_API_KEY")
+
+
+def _resolve_ai_provider(request: Request) -> str:
+    """'openrouter' when the resolved key looks like an OpenRouter key, else 'gemini'."""
+    key = None
+    for hdr in ("X-OpenRouter-Key", "X-OpenRouter-API-Key", "X-Gemini-Key"):
+        v = request.headers.get(hdr)
+        if v and v.strip():
+            key = v.strip()
+            break
+    if not key:
+        key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY") or ""
+    k = key.strip()
+    if k.startswith("sk-or-v1-") or k.startswith("sk-or-"):
+        return "openrouter"
+    # OpenRouter key can also be in env even when header holds dummy
+    or_env = os.environ.get("OPENROUTER_API_KEY") or ""
+    if or_env.strip().startswith("sk-or-"):
+        # If header is empty but env has OR key, provider is OR
+        if not request.headers.get("X-Gemini-Key"):
+            return "openrouter"
+    return "gemini"
+
+
+def _resolve_openrouter_model(request: Request) -> str:
+    """Model for OpenRouter jobs (header X-OpenRouter-Model wins)."""
+    for hdr in ("X-OpenRouter-Model", "X-OpenRouter-model"):
+        v = request.headers.get(hdr)
+        if v and v.strip():
+            return v.strip()
+    return (
+        os.environ.get("OPENROUTER_MODEL")
+        or os.environ.get("GEMINI_MODEL")
+        or "meta-llama/llama-3.1-8b-instruct:free"
+    ).strip() or "meta-llama/llama-3.1-8b-instruct:free"
 
 
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
@@ -1440,7 +1494,80 @@ async def get_config():
         "billingEnabled": BILLING_ENABLED,
         "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
+        "openRouterEnabled": True,
+        "defaultOpenRouterModel": os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free"),
     }
+
+
+# Cache for OpenRouter free models (1 hour). Avoids hammering the API on every settings open.
+_OR_MODELS_CACHE = {"time": 0, "data": []}
+
+
+@app.get("/api/openrouter/models")
+async def list_openrouter_models(request: Request):
+    """Auto-detect free models from OpenRouter. Uses the caller's key if provided,
+    otherwise the server's env key, otherwise tries unauthenticated (public list is often allowed).
+    Returns {models: [{id, name, pricing}], cached: bool}."""
+    import httpx as _httpx
+
+    # Prefer caller's key (header) so free-detection works even before env is set
+    api_key = None
+    for hdr in ("X-OpenRouter-Key", "X-OpenRouter-API-Key", "X-Gemini-Key"):
+        v = request.headers.get(hdr)
+        if v and v.strip().startswith("sk-or-"):
+            api_key = v.strip()
+            break
+    if not api_key:
+        api_key = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or "").strip() or None
+
+    # Serve from cache if fresh (60 min)
+    now = time.time()
+    if _OR_MODELS_CACHE["data"] and now - _OR_MODELS_CACHE["time"] < 3600:
+        return {"models": _OR_MODELS_CACHE["data"], "cached": True, "count": len(_OR_MODELS_CACHE["data"])}
+
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    # OpenRouter recommends these but not required for models list
+    headers["HTTP-Referer"] = os.environ.get("OPENROUTER_REFERER", "http://localhost:5175")
+    headers["X-Title"] = os.environ.get("OPENROUTER_TITLE", "OpenShorts")
+
+    try:
+        async with _httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://openrouter.ai/api/v1/models", headers=headers)
+            # 401 on free list often still returns data; if 401 fallback to unauthenticated try
+            if resp.status_code == 401 and api_key:
+                async with _httpx.AsyncClient(timeout=15) as c2:
+                    resp = await c2.get("https://openrouter.ai/api/v1/models", headers={
+                        "HTTP-Referer": headers["HTTP-Referer"], "X-Title": headers["X-Title"]
+                    })
+            resp.raise_for_status()
+            data = resp.json()
+            all_models = data.get("data", []) if isinstance(data, dict) else []
+            free = []
+            for m in all_models:
+                mid = m.get("id") or ""
+                pricing = m.get("pricing") or {}
+                # Free = :free suffix OR prompt+completion == 0
+                is_free = mid.endswith(":free") or (pricing.get("prompt") == "0" and pricing.get("completion") == "0")
+                if is_free:
+                    free.append({
+                        "id": mid,
+                        "name": m.get("name") or mid,
+                        "pricing": pricing,
+                        "context_length": m.get("context_length"),
+                    })
+            # Sort: :free first, then by name
+            free.sort(key=lambda x: (0 if x["id"].endswith(":free") else 1, x["id"]))
+            # Cache
+            _OR_MODELS_CACHE["time"] = now
+            _OR_MODELS_CACHE["data"] = free
+            return {"models": free, "cached": False, "count": len(free)}
+    except Exception as e:
+        # On error, return cached if any, else empty with error
+        if _OR_MODELS_CACHE["data"]:
+            return {"models": _OR_MODELS_CACHE["data"], "cached": True, "count": len(_OR_MODELS_CACHE["data"]), "warning": str(e)[:200]}
+        raise HTTPException(status_code=502, detail=f"Could not fetch OpenRouter models: {e}")
 
 async def _probe_youtube_quality(url: str) -> dict:
     """Run quality_probe.py in a worker thread; {} on any failure (fail-open)."""
@@ -1658,7 +1785,24 @@ async def process_endpoint(
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
     env = os.environ.copy()
-    env["GEMINI_API_KEY"] = api_key # Override with key from request
+    # Route the key to the right provider: OpenRouter keys go to OPENROUTER_API_KEY,
+    # Gemini keys to GEMINI_API_KEY. When the key looks like OpenRouter, also mirror
+    # it to GEMINI_API_KEY so legacy code paths that only check that var still see a key,
+    # but set OPENROUTER_API_KEY as the authoritative one.
+    provider = _resolve_ai_provider(request)
+    model_for_job = _resolve_openrouter_model(request) if provider == "openrouter" else ""
+    if provider == "openrouter":
+        env["OPENROUTER_API_KEY"] = api_key
+        env["GEMINI_API_KEY"] = api_key  # keep legacy fallback happy
+        env["OPENROUTER_MODEL"] = model_for_job
+        # Clear any stale Gemini model env that would shadow the OR model
+        # (main.py checks OPENROUTER_MODEL first when provider is OR)
+        print(f"[ai-provider] job={job_id} provider=openrouter model={model_for_job}")
+    else:
+        env["GEMINI_API_KEY"] = api_key
+        # Ensure OpenRouter not accidentally triggered by stale env
+        env.pop("OPENROUTER_API_KEY", None)
+        print(f"[ai-provider] job={job_id} provider=gemini")
 
     # Optional layouts are per job. The renderer reads these at import time in
     # the subprocess, so they must be set before Popen — same path WATERMARK

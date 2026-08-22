@@ -5,8 +5,8 @@ import seo from './vite-plugin-seo'
 // Backend target for the dev proxy. Defaults to the docker-compose service
 // name; set VITE_PROXY_TARGET=http://localhost:8000 to run the dev server on
 // the host against a backend reachable at localhost (no CORS, same-origin).
-const backend = process.env.VITE_PROXY_TARGET || 'http://backend:8000'
-const renderer = process.env.VITE_RENDER_TARGET || 'http://renderer:3100'
+const backend = (process.env.VITE_PROXY_TARGET || 'http://backend:8000').trim()
+const renderer = (process.env.VITE_RENDER_TARGET || 'http://renderer:3100').trim()
 
 // https://vitejs.dev/config/
 export default defineConfig({

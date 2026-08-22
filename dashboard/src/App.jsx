@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, PanelLeft, PanelLeftClose, Menu } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
@@ -185,10 +185,13 @@ const SESSION_KEY = 'openshorts_session';
 // already purged server-side fails gracefully and clears the saved session.
 const SESSION_MAX_AGE = 86400000; // 24 hours
 
-// Mock polling function
 const pollJob = async (jobId) => {
   const res = await apiFetch(`/api/status/${jobId}`);
-  if (!res.ok) throw new Error('Status check failed');
+  if (!res.ok) {
+    const err = new Error('Status check failed');
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 };
 
@@ -235,6 +238,10 @@ function App() {
     try { return localStorage.getItem('os_social_nudge_dismissed') === '1'; } catch (_) { return false; }
   });
   const [showKeyModal, setShowKeyModal] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem('os_sidebar_collapsed') === '1'; } catch (_) { return false; }
+  });
+  const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
@@ -528,6 +535,16 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uploadPostKey, isManaged]);
 
+  // Persist sidebar collapsed state
+  useEffect(() => {
+    try { localStorage.setItem('os_sidebar_collapsed', sidebarCollapsed ? '1' : '0'); } catch (_) { /* ignore */ }
+  }, [sidebarCollapsed]);
+
+  // Close mobile drawer when tab changes
+  useEffect(() => {
+    setSidebarMobileOpen(false);
+  }, [activeTab]);
+
   // For managed users, fetch the durable R2 URLs of the current job's clips so the
   // preview can fall back to them when the local files have been cleaned up.
   useEffect(() => {
@@ -573,6 +590,14 @@ function App() {
           }
         } catch (e) {
           console.error("Polling error", e);
+          if (e?.status === 404) {
+            clearInterval(interval);
+            try { localStorage.removeItem(SESSION_KEY); } catch {}
+            if (status === 'processing') {
+              setStatus('error');
+              setLogs(prev => [...prev, "Job session expired or not found on server."]);
+            }
+          }
         }
       }, 2000);
     }
@@ -606,8 +631,9 @@ function App() {
   };
 
   // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
-  // `keysMissing` now means "self-host BYOK keys missing" — it never fires on hosted.
-  const keysMissing = !billingEnabled && (!apiKey || !uploadPostKey);
+  // Clips-only local mode: only the AI key (Gemini or OpenRouter) is required;
+  // Upload-Post/social is optional and disabled when DISABLE_YOUTUBE_URL is on.
+  const keysMissing = !billingEnabled && !apiKey;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: show the welcome plan-choice popup once (AuthContext set the
@@ -689,9 +715,22 @@ function App() {
 
     try {
       let body;
-      // BYOK sends the Gemini header; managed users rely on the bearer token
-      // that apiFetch attaches automatically.
-      const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
+      // BYOK sends the AI key header; auto-detect OpenRouter (sk-or-*) vs Gemini.
+      // The backend also accepts X-OpenRouter-Key explicitly.
+      const isOR = apiKey && (apiKey.trim().startsWith('sk-or-v1-') || apiKey.trim().startsWith('sk-or-'));
+      const headers = {};
+      if (apiKey) {
+        if (isOR) {
+          headers['X-OpenRouter-Key'] = apiKey;
+          // Also send a selected model if user chose one (stored in localStorage)
+          try {
+            const m = localStorage.getItem('openrouter_model');
+            if (m) headers['X-OpenRouter-Model'] = m;
+          } catch {}
+        } else {
+          headers['X-Gemini-Key'] = apiKey;
+        }
+      }
 
       // Advanced generation controls: only sent when the user set them, so the
       // default request stays byte-identical to the pre-feature one.
@@ -923,17 +962,11 @@ function App() {
               <button
                 onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : setActiveTab('settings'))}
                 className="badge-warn hover:brightness-125 transition-all"
-                title="Configure API keys or choose a plan"
+                title="Configure AI API key (Gemini or OpenRouter free)"
               >
                 <AlertTriangle size={12} />
-                <span className="hidden sm:inline">
-                  {!apiKey && !uploadPostKey
-                    ? 'Gemini & Upload-Post keys missing'
-                    : !apiKey
-                      ? 'Gemini API Key Missing'
-                      : 'Upload-Post API Key Missing'}
-                </span>
-                <span className="sm:hidden">keys missing</span>
+                <span className="hidden sm:inline">AI API Key Missing (Gemini or OpenRouter)</span>
+                <span className="sm:hidden">key missing</span>
               </button>
             )}
           </div>
@@ -945,13 +978,9 @@ function App() {
             <div className="flex items-center gap-3 text-sm text-ink2">
               <KeyRound size={16} className="shrink-0 text-warn" />
               <div>
-                <span className="font-medium text-ink">Required API keys missing.</span>{' '}
+                <span className="font-medium text-ink">AI API key missing.</span>{' '}
                 <span className="text-muted">
-                  {!apiKey && !uploadPostKey
-                    ? 'Set your Gemini and Upload-Post API keys to use OpenShorts.'
-                    : !apiKey
-                      ? 'Set your Gemini API key to use OpenShorts.'
-                      : 'Set your Upload-Post API key to use OpenShorts.'}
+                  Set your Gemini or OpenRouter (free) API key in Settings to generate clips.
                 </span>
               </div>
             </div>
@@ -1046,29 +1075,29 @@ function App() {
                 <>
               <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
 
-              <div className="card p-4 sm:p-6 mt-8">
+              <div className="card p-4 sm:p-6 mt-8 border-dashed opacity-80">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
-                      <Share2 size={16} className="text-brass" />
+                      <Share2 size={16} className="text-muted" />
                     </div>
                     <h2 className="text-base font-medium text-ink lowercase">Social Integration</h2>
                   </div>
-                  <span className="badge-warn">Required</span>
+                  <span className="readout">Optional — clips only</span>
                 </div>
                 <p className="text-xs text-muted mb-6 leading-relaxed">
-                  Required to publish your clips to TikTok, Instagram Reels, and YouTube Shorts via <strong>Upload-Post</strong>.
-                  Includes a <strong>free tier</strong> (no credit card required).
+                  Optional — only needed to auto-post clips to TikTok / Instagram / YouTube via <strong>Upload-Post</strong>.
+                  Clips generate and download fine without it. Enable when you want automation.
                 </p>
                 <div className="space-y-4">
-                  <label className="block text-sm text-muted">Upload-Post API Key</label>
+                  <label className="block text-sm text-muted">Upload-Post API Key (optional)</label>
                   <div className="flex flex-col sm:flex-row gap-2">
                     <input
                       type="password"
                       value={uploadPostKey}
                       onChange={(e) => setUploadPostKey(e.target.value)}
                       className="input-field"
-                      placeholder="ey..."
+                      placeholder="ey... (optional)"
                     />
                     <button onClick={fetchUserProfiles} className="btn-quiet py-2 px-4 text-sm">
                       Connect

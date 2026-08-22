@@ -1,13 +1,17 @@
 """Central video-encoder selection for every ffmpeg encode call site.
 
 FFMPEG_ENCODER env values:
-  x264  (default) — CPU libx264, exact pre-GPU behavior
+  x264            — CPU libx264, exact pre-GPU behavior
   nvenc           — force h264_nvenc; probed once and falls back to x264
                     (with a warning) if the GPU/driver is unavailable
-  auto            — h264_nvenc when the probe succeeds, else x264
+  auto (default)  — h264_nvenc when the probe succeeds, else x264 (GPU-first)
 
 Only the codec/quality args live here; surrounding args (-movflags, -pix_fmt,
 audio codecs, filters) stay at each call site.
+
+GPU-first: the default is now ``auto`` so any host with a working NVENC
+driver automatically encodes on the GPU without configuration. Set
+FFMPEG_ENCODER=x264 to pin CPU for debugging or on hosts without a GPU.
 """
 import os
 import subprocess
@@ -93,6 +97,7 @@ def audio_encode_args():
 
 _probe_lock = threading.Lock()
 _nvenc_ok = None  # None = not probed yet
+_hwaccel_ok = None  # None = not probed yet
 _announced = False
 
 
@@ -116,6 +121,27 @@ def _probe_nvenc():
         return False
 
 
+def _probe_hwaccel():
+    """Probe whether ffmpeg can decode with -hwaccel cuda (GPU decode).
+
+    Uses a tiny lavfi source piped through the cuda hwaccel path. Any
+    failure (no GPU, ffmpeg built without cuda) means False.
+    """
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+        "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+        "-f", "null", "-",
+    ]
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def nvenc_available():
     """Probe h264_nvenc once and cache the verdict (thread-safe)."""
     global _nvenc_ok
@@ -126,11 +152,29 @@ def nvenc_available():
     return _nvenc_ok
 
 
+def hwaccel_available():
+    """Probe -hwaccel cuda once and cache the verdict (thread-safe)."""
+    global _hwaccel_ok
+    if _hwaccel_ok is None:
+        with _probe_lock:
+            if _hwaccel_ok is None:
+                _hwaccel_ok = _probe_hwaccel()
+    return _hwaccel_ok
+
+
+def hwaccel_decode_args():
+    """Return ffmpeg input args for GPU decode when available, else []."""
+    if hwaccel_available():
+        return ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+    return []
+
+
 def reset_encoder_cache():
     """Test hook: forget the cached probe result."""
-    global _nvenc_ok, _announced
+    global _nvenc_ok, _hwaccel_ok, _announced
     with _probe_lock:
         _nvenc_ok = None
+        _hwaccel_ok = None
         _announced = False
 
 
@@ -140,7 +184,9 @@ def video_encode_args(tier=QUALITY):
     if tier not in _X264_ARGS:
         raise ValueError(f"Unknown encode tier: {tier!r}")
 
-    mode = os.environ.get("FFMPEG_ENCODER", "x264").strip().lower()
+    mode = os.environ.get("FFMPEG_ENCODER", "auto").strip().lower()
+    if mode not in ("x264", "nvenc", "auto"):
+        mode = "auto"
     use_nvenc = False
     if mode in ("nvenc", "auto"):
         use_nvenc = nvenc_available()

@@ -43,5 +43,17 @@ skills/*
 skills-lock.json
 
 
+# Audio files
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+
+# Test scratch scripts in root
+test_*.py
+test_*.mp3
+check_*.py
+
 # Cloud env example kept local only (avoid leaking infra hints)
 .env.cloud.example

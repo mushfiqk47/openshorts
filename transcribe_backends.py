@@ -27,9 +27,19 @@ with other models on the host, so loads can OOM under load).
 """
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+
+# Windows cp1252 can't encode the transcription emoji; force utf-8 for the subprocess output
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 from subtitles import (
     get_whisper_config,
@@ -140,12 +150,17 @@ def run_whisper_transcription(media_path, **params):
     A CUDA failure (model load OOM or mid-decode) retries once on CPU and
     pins CPU for the rest of the process — the GPU is shared with other
     models, so a job must degrade instead of dying when VRAM runs out.
+    When WHISPER_FORCE_GPU=1 (user requested GPU-only), the fallback is
+    disabled and the error is raised directly.
     """
     global _whisper_model, _whisper_force_cpu
     try:
         return _run_whisper_once(media_path, **params)
     except RuntimeError as e:
         if _whisper_force_cpu or "cuda" not in str(e).lower():
+            raise
+        if os.environ.get("WHISPER_FORCE_GPU", "").strip() in ("1","true","yes"):
+            print(f"❌ [ASR] whisper GPU failed but WHISPER_FORCE_GPU=1 — not falling back to CPU: {e}", flush=True)
             raise
         print(f"⚠️ [ASR] whisper GPU failed ({e}) — retrying on CPU", flush=True)
         _whisper_force_cpu = True

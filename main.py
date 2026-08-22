@@ -4,6 +4,15 @@ import subprocess
 import argparse
 import re
 import sys
+
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,20 +26,56 @@ from tqdm import tqdm
 import yt_dlp
 import mediapipe as mp
 # import whisper (replaced by faster_whisper inside function)
-from google import genai
-from google.genai import types as genai_types
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:
+    genai = None
+    genai_types = None
 
 import gemini_worker
 import layout_picker
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
-                          QUALITY_FAST, METADATA_SCRUB)
+                          QUALITY_FAST, METADATA_SCRUB, hwaccel_decode_args)
 from dotenv import load_dotenv
 import json
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
+
+# OpenRouter (free model) path — optional, used when OPENROUTER_API_KEY is set
+try:
+    import openrouter_client  # noqa: F401
+    _HAS_OPENROUTER = True
+except ImportError:
+    _HAS_OPENROUTER = False
+
+
+def _use_openrouter() -> bool:
+    """True when an OpenRouter key is configured (env or mirrored from request)."""
+    k = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or "").strip()
+    if k:
+        return True
+    # Also accept a GEMINI_API_KEY that looks like an OpenRouter key (dashboard single field)
+    g = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    return g.startswith("sk-or-v1-") or g.startswith("sk-or-")
+
+
+def _openrouter_key() -> str:
+    k = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or "").strip()
+    if k:
+        return k
+    return (os.environ.get("GEMINI_API_KEY") or "").strip()
+
+
+def _openrouter_model() -> str:
+    return (
+        os.environ.get("OPENROUTER_MODEL")
+        or os.environ.get("GEMINI_MODEL")
+        or "meta-llama/llama-3.1-8b-instruct:free"
+    ).strip() or "meta-llama/llama-3.1-8b-instruct:free"
 
 # Load environment variables
 load_dotenv()
@@ -81,11 +126,31 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
 # YOLO_MODEL_PATH lets deployments point at a pre-downloaded weights file so a
 # volume mounted over the workdir doesn't trigger a re-download at startup.
 model = YOLO(os.environ.get("YOLO_MODEL_PATH", "yolov8n.pt"))
+# GPU-first: when CUDA is available put YOLO on the GPU (Ultralytics handles
+# device selection per call, but the initial .to() pins weights to VRAM).
+try:
+    _yolo_device = os.environ.get("YOLO_DEVICE", "auto").strip().lower()
+    if _yolo_device == "auto":
+        import torch as _torch_yolo
+        _yolo_device = "cuda" if _torch_yolo.cuda.is_available() else "cpu"
+    if _yolo_device in ("cuda", "0", "gpu"):
+        model.to("cuda")
+        print("🎯 [YOLO] device: cuda (GPU)")
+    else:
+        print(f"🎯 [YOLO] device: {_yolo_device}")
+except Exception as _e:
+    print(f"⚠️ [YOLO] GPU init failed ({_e}) — staying on CPU")
 
 # --- MediaPipe Setup ---
-# Use standard Face Detection (BlazeFace) for speed
-mp_face_detection = mp.solutions.face_detection
-face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+# Use standard Face Detection (BlazeFace) for speed — optional on Python 3.13 / newer mediapipe wheels
+# where `solutions` was removed. Falls back to YOLO-only when unavailable.
+try:
+    mp_face_detection = mp.solutions.face_detection  # type: ignore[attr-defined]
+    face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+except Exception as _mp_err:  # pragma: no cover - import-time fallback
+    print(f"⚠️ MediaPipe FaceDetection unavailable ({_mp_err}) — using YOLO fallback for face detection.", flush=True)
+    mp_face_detection = None
+    face_detection = None
 
 # Consecutive detections a large target move must survive before the camera
 # follows it (see SmoothedCameraman.update_target). Env-overridable so the
@@ -378,16 +443,24 @@ def detect_face_candidates(frame):
     Returns list of all detected faces using lightweight FaceDetection.
     Boxes are in ORIGINAL frame coordinates (detection runs downscaled;
     MediaPipe's relative coords make the mapping exact).
+    Falls back to empty list when MediaPipe FaceDetection is unavailable
+    (Python 3.13 / mediapipe>=0.10.30 without solutions) — the caller will
+    then use YOLO person detection as fallback.
     """
+    if face_detection is None:
+        return []
     height, width, _ = frame.shape
     small, _scale = _detection_frame(frame)
     rgb_frame = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
     with DETECT_LOCK:
-        results = face_detection.process(rgb_frame)
+        try:
+            results = face_detection.process(rgb_frame)
+        except Exception:
+            return []
     
     candidates = []
     
-    if not results.detections:
+    if not results or not getattr(results, "detections", None):
         return []
         
     for detection in results.detections:
@@ -1270,6 +1343,8 @@ def transcribe_video(video_path):
 def _run_gemini_stage(client, model_name, prompt, schema):
     """One schema-enforced Gemini call with transient-error backoff.
     Returns (parsed_dict, cost_analysis)."""
+    if genai_types is None or client is None:
+        raise RuntimeError("google-genai not installed — install google-genai or use OpenRouter")
     config = genai_types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
@@ -1309,6 +1384,20 @@ def _run_gemini_stage(client, model_name, prompt, schema):
             time.sleep(wait)
 
 
+def _run_openrouter_stage(prompt: str, mode: str) -> tuple[dict, dict | None]:
+    """One OpenRouter call — score or detail — returning (parsed, cost)."""
+    import openrouter_client
+
+    key = _openrouter_key()
+    model = _openrouter_model()
+    if not key:
+        raise RuntimeError("OPENROUTER_API_KEY not set")
+    # score = precise (0.2), detail = creative (0.7)
+    temp = 0.2 if mode == "score" else 0.7
+    parsed, cost = openrouter_client.call_openrouter(prompt, api_key=key, model=model, temperature=temp)
+    return parsed, cost
+
+
 def get_viral_clips(transcript_result, video_duration):
     """Two-pass clip selection: score transcript windows, then detail the best.
 
@@ -1316,17 +1405,35 @@ def get_viral_clips(transcript_result, video_duration):
     transcript clusters picks near the start), and the cheap scoring pass keeps
     the expensive detail reasoning focused on the shortlist. Cuts are snapped to
     word boundaries so clips don't start/end mid-word.
+
+    Routes through OpenRouter when OPENROUTER_API_KEY (or an sk-or-* Gemini key)
+    is present; otherwise uses Gemini. The same prompts and snapping are used
+    either way so results stay comparable.
     """
-    print("\U0001f916  Analyzing with Gemini (2-pass: score → detail)...")
-    api_key = os.getenv("GEMINI_API_KEY")
+    use_or = _use_openrouter()
+    if use_or:
+        api_key = _openrouter_key()
+        model_name = _openrouter_model()
+        provider = "OpenRouter"
+    else:
+        api_key = os.getenv("GEMINI_API_KEY")
+        model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+        provider = "Gemini"
     if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
+        print("❌ Error: No AI API key found. Set OPENROUTER_API_KEY (sk-or-...) for free models or GEMINI_API_KEY.")
         return None
 
-    client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+    if not use_or:
+        if genai is None:
+            print("❌ google-genai not installed. pip install google-genai or set OPENROUTER_API_KEY")
+            return None
+        client = genai.Client(api_key=api_key)
+    else:
+        client = None
+        print(f"🤖 Using OpenRouter (free model path) — set OPENROUTER_MODEL to change it.")
     language = str(transcript_result.get('language') or 'unknown')
-    print(f"\U0001f916  Model: {model_name} | language: {language}")
+    print(f"\U0001f916 Analyzing with {provider} (2-pass: score → detail)...")
+    print(f"\U0001f916  Model: {model_name} | language: {language} | provider: {provider.lower()}")
 
     # Full word list — ground truth for snapping cut points.
     words = []
@@ -1355,7 +1462,10 @@ def get_viral_clips(transcript_result, video_duration):
             prompt = gemini_worker.SCORE_PROMPT_TEMPLATE.format(
                 video_duration=video_duration, language=language,
                 windows_json=json.dumps(payload, ensure_ascii=False))
-            parsed, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.ScoreResponse)
+            if use_or:
+                parsed, cost = _run_openrouter_stage(prompt, "score")
+            else:
+                parsed, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.ScoreResponse)
             if cost:
                 costs.append(cost)
             scored.extend(parsed.get("windows") or [])
@@ -1378,7 +1488,10 @@ def get_viral_clips(transcript_result, video_duration):
             min_clips=min_clips, max_clips=max_clips,
             min_secs=min_secs, max_secs=max_secs,
             windows_json=json.dumps(payload, ensure_ascii=False))
-        detail, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.DetailResponse)
+        if use_or:
+            detail, cost = _run_openrouter_stage(prompt, "detail")
+        else:
+            detail, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.DetailResponse)
         if cost:
             costs.append(cost)
 
@@ -1414,18 +1527,32 @@ def get_viral_clips(transcript_result, video_duration):
         print(f"🚫 {e}")
         raise
     except Exception as e:
-        print(f"❌ Gemini Error: {e}")
+        print(f"❌ {provider} Error: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
 def get_visual_clips(video_path, video_duration, language="en"):
     """Clip a SILENT video by vision: Gemini watches the footage and picks the
     most engaging visual moments (no transcript). Returns the same
-    {"shorts", "cost_analysis"} shape as get_viral_clips, or None."""
+    {"shorts", "cost_analysis"} shape as get_viral_clips, or None.
+
+    When OpenRouter is configured, vision is not available (no video upload),
+    so this path returns None and the caller falls back to a hard error with a
+    helpful message.
+    """
+    if _use_openrouter():
+        print("🎥  Silent video — vision analysis requires Gemini (OpenRouter vision not yet wired).")
+        print("   Tip: add speech/audio to the video or set a GEMINI_API_KEY for silent clips.")
+        return None
     print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         print("❌ Error: GEMINI_API_KEY not found.")
+        return None
+    if genai is None:
+        print("❌ google-genai not installed — install it for silent-video vision")
         return None
     client = genai.Client(api_key=api_key)
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
@@ -1660,11 +1787,12 @@ if __name__ == '__main__':
 
                 try:
                     # ffmpeg cut — re-encoding for precision on strict seconds
+                    # GPU decode when available (hwaccel probe cached)
                     cut_command = [
                         'ffmpeg', '-y',
                         '-ss', str(start),
                         '-to', str(end),
-                        '-i', input_video,
+                        *hwaccel_decode_args(), '-i', input_video,
                         *video_encode_args(QUALITY_FAST),
                         *audio_encode_args(),
                         clip_temp_path

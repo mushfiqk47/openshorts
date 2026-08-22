@@ -14,12 +14,35 @@ _STDIO_CONFIGURED = False
 DEFAULT_WHISPER_MODEL = "small"
 
 
+def _auto_whisper_device():
+    """GPU-first whisper device: cuda when a GPU is present, else cpu.
+
+    Env var WHISPER_DEVICE pins the choice; when unset we probe torch once.
+    WHISPER_DEVICE=auto also probes. This makes self-host installs that do
+    have a GPU automatically transcribe on it without editing .env.
+    """
+    explicit = os.environ.get("WHISPER_DEVICE", "").strip().lower()
+    if explicit and explicit != "auto":
+        return explicit
+    # auto-detect
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
 def get_whisper_config():
     """Return the faster-whisper model config, overridable via env vars."""
+    device = _auto_whisper_device()
+    # compute_type default follows the device when not pinned
+    default_compute = "float16" if device == "cuda" else "int8"
     return {
         "model_size": os.environ.get("WHISPER_MODEL", DEFAULT_WHISPER_MODEL),
-        "device": os.environ.get("WHISPER_DEVICE", "cpu"),
-        "compute_type": os.environ.get("WHISPER_COMPUTE", "int8"),
+        "device": device,
+        "compute_type": os.environ.get("WHISPER_COMPUTE", default_compute),
     }
 
 
