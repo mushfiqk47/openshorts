@@ -139,7 +139,7 @@ def _probe_hwaccel():
     """
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+        "-hwaccel", "cuda",
         "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
         "-f", "null", "-",
     ]
@@ -175,7 +175,7 @@ def hwaccel_available():
 def hwaccel_decode_args():
     """Return ffmpeg input args for GPU decode when available, else []."""
     if hwaccel_available():
-        return ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        return ["-hwaccel", "cuda"]
     return []
 
 

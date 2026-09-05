@@ -11,6 +11,9 @@ import { track } from '../lib/analytics';
 import { report as reportAttribution } from '../lib/attribution';
 
 const AuthContext = createContext(null);
+// AuthProvider and useAuth live together by design (React's documented
+// context pattern) — not a fast-refresh boundary issue.
+// eslint-disable-next-line react-refresh/only-export-components
 export const useAuth = () => useContext(AuthContext);
 
 export function AuthProvider({ children }) {
@@ -25,7 +28,7 @@ export function AuthProvider({ children }) {
       const data = await apiJson('/api/me');
       setMe(data);
       return data;
-    } catch (e) {
+    } catch {
       // Stale/invalid token: drop it and fall back to anonymous BYOK.
       clearToken();
       setMe(null);
@@ -87,7 +90,7 @@ export function AuthProvider({ children }) {
           localStorage.setItem('os_welcomed', '1');
         } catch (_) { /* ignore */ }
       }
-    } catch (e) {
+    } catch {
       // fall through — user lands signed-out
     } finally {
       setSigningIn(false);

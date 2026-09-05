@@ -44,6 +44,18 @@ const POSITION_OPTIONS = [
     { value: 'bottom', label: 'bottom' },
 ];
 
+const SIZE_OPTIONS = [
+    { value: 'S', label: 'Small' },
+    { value: 'M', label: 'Medium' },
+    { value: 'L', label: 'Large' },
+];
+
+const SIZE_TO_FONTSIZE = {
+    'S': 10,
+    'M': 13,
+    'L': 17,
+};
+
 // Ready-made caption looks burned server-side as karaoke ASS (word highlight):
 // dimmed base text + strong active word, optional glow/pop/box effect.
 const CAPTION_PRESETS = [
@@ -65,9 +77,9 @@ const swatchClass = (selected) =>
         ? 'ring-2 ring-[color:var(--color-accent)] ring-offset-2 ring-offset-[color:var(--color-paper-2)]'
         : 'ring-1 ring-[color:var(--color-rule-2)] hover:ring-[color:var(--color-accent)]'}`;
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress }) {
+export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingSubtitle = null, existingHook, bulkCount = 0, bulkProgress }) {
     const [position, setPosition] = useState('bottom');
-    const [fontSize] = useState(24);
+    const [fontSize, setFontSize] = useState(13);
     const [fontName, setFontName] = useState('Verdana');
     const [fontColor, setFontColor] = useState('#FFFFFF');
     const [highlightColor, setHighlightColor] = useState('#FFDD00');
@@ -84,6 +96,30 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     const [baseOpacity, setBaseOpacity] = useState(1.0);
     const [uppercase, setUppercase] = useState(false);
     const [activePreset, setActivePreset] = useState(null);
+
+    // Synchronize style from clip's existing subtitle settings if present
+    useEffect(() => {
+        if (!isOpen) return;
+        if (existingSubtitle && typeof existingSubtitle === 'object') {
+            const rawSize = existingSubtitle.fontsize ?? existingSubtitle.font_size;
+            if (rawSize) {
+                // If old buggy value was 44 or > 24, reset down to 13
+                setFontSize(rawSize > 24 ? 13 : rawSize);
+            }
+            if (existingSubtitle.font_name) setFontName(existingSubtitle.font_name);
+            if (existingSubtitle.font_color) setFontColor(existingSubtitle.font_color);
+            if (existingSubtitle.highlight_color) setHighlightColor(existingSubtitle.highlight_color);
+            if (existingSubtitle.border_color) setBorderColor(existingSubtitle.border_color);
+            if (existingSubtitle.border_width !== undefined) setBorderWidth(existingSubtitle.border_width);
+            if (existingSubtitle.bg_color) setBgColor(existingSubtitle.bg_color);
+            if (existingSubtitle.bg_opacity !== undefined) setBgOpacity(existingSubtitle.bg_opacity);
+            if (existingSubtitle.alignment) setPosition(existingSubtitle.alignment);
+            if (existingSubtitle.style) setStyle(existingSubtitle.style);
+            if (existingSubtitle.effect) setEffect(existingSubtitle.effect);
+            if (existingSubtitle.base_opacity !== undefined) setBaseOpacity(existingSubtitle.base_opacity);
+            if (existingSubtitle.uppercase !== undefined) setUppercase(existingSubtitle.uppercase);
+        }
+    }, [isOpen, existingSubtitle]);
 
     const applyPreset = (p) => {
         setActivePreset(p.id);
@@ -160,7 +196,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
         position,
         style: {
             fontFamily: fontName,
-            fontSize: fontSize * 2.2, // Scale up for 1080p (modal fontSize is for small preview)
+            fontSize: Math.round(fontSize * 5.67), // Match 1080p ASS render scale
             fontColor,
             highlightColor,
             borderColor,
@@ -187,7 +223,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     const fallbackPreviewStyle = {
         fontFamily: fontName,
         color: fontColor,
-        fontSize: '20px',
+        fontSize: `${Math.round(fontSize * 1.3)}px`,
         fontWeight: 'bold',
         maxWidth: '85%',
         padding: '6px 12px',
@@ -294,6 +330,32 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                 onChange={setPosition}
                                 size="sm"
                             />
+                        </div>
+
+                        {/* Subtitle Size Selector */}
+                        <div>
+                            <div className="flex justify-between items-center mb-2">
+                                <p className="eyebrow">Size</p>
+                                <span className="readout">{fontSize <= 10 ? 'Small' : fontSize <= 14 ? 'Medium' : 'Large'} ({fontSize}pt)</span>
+                            </div>
+                            <SegmentedControl
+                                options={SIZE_OPTIONS}
+                                value={fontSize <= 10 ? 'S' : fontSize <= 14 ? 'M' : 'L'}
+                                onChange={(val) => setFontSize(SIZE_TO_FONTSIZE[val] || 13)}
+                                size="sm"
+                            />
+                            <div className="mt-2 flex items-center gap-2">
+                                <span className="text-[10px] text-muted font-bold">A</span>
+                                <input
+                                    type="range"
+                                    min="8"
+                                    max="22"
+                                    value={fontSize}
+                                    onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
+                                    className="w-full accent-[var(--color-accent)]"
+                                />
+                                <span className="text-sm text-muted font-bold">A</span>
+                            </div>
                         </div>
 
                         {/* Animation Style (new) */}

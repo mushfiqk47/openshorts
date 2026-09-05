@@ -7,7 +7,8 @@ import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
-import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
+import WatermarkModal from './WatermarkModal';
+import { watermarkNoticeDismissed } from '../lib/watermark';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
@@ -207,7 +208,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                 });
             }
         }
-    }, [showModal, clip]);
+    }, [showModal, clip, knownConnections, connectedPlatforms]);
 
     const handleAutoEdit = async () => {
         setIsEditing(true);
@@ -273,7 +274,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                 try {
                     const jsonErr = JSON.parse(errText);
                     throw new Error(jsonErr.detail || errText);
-                } catch (e) {
+                } catch {
                     throw new Error(errText);
                 }
             }
@@ -633,7 +634,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                 try {
                     const jsonErr = JSON.parse(errText);
                     throw new Error(jsonErr.detail || errText);
-                } catch (e) {
+                } catch {
                     throw new Error(errText);
                 }
             }
@@ -1030,6 +1031,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                 videoUrl={originalVideoUrl}
                 jobId={jobId}
                 clipIndex={index}
+                existingSubtitle={clip.subtitle_style}
                 existingHook={activeLayers.hook}
             />
 

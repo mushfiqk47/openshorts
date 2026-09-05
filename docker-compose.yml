@@ -26,6 +26,9 @@ services:
       context: ./dashboard
       target: dev
     container_name: openshorts-frontend
+    environment:
+      - VITE_PROXY_TARGET=http://backend:8000
+      - VITE_RENDER_TARGET=http://renderer:3100
     ports:
       - "5175:5173"
     volumes:

@@ -200,7 +200,7 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
     const words = useMemo(() => (edl?.words || []), [edl]);
     const sourceAvailable = !!edl?.source?.available;
     const sourceDuration = edl?.source?.duration || 0;
-    const canonical = edl?.canonical_range || { start: 0, end: 0 };
+    const canonical = useMemo(() => edl?.canonical_range || { start: 0, end: 0 }, [edl]);
     const limits = edl?.limits || { max_segments: 12, min_segment_seconds: MIN_SEGMENT_SECONDS, max_total_seconds: 180 };
     const minSeg = limits.min_segment_seconds || MIN_SEGMENT_SECONDS;
 

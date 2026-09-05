@@ -191,7 +191,7 @@ const NAV = `
   <a class="cta" href="${SITE.url}/">Get free clips</a>
 </div></header>`
 
-const footer = (related) => `
+const footer = () => `
 <footer class="site"><div class="wrap">
   <div class="row">
     <a href="${SITE.url}/">OpenShorts</a>
@@ -282,7 +282,7 @@ ${page.tldr ? `<div class="tldr"><span class="label">TL;DR</span>${page.tldr.map
 ${page.body}
 ${relatedBlock(related)}
 </div></main>
-${footer(related)}
+${footer()}
 </body>
 </html>`
 }

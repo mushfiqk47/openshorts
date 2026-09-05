@@ -1,13 +1,9 @@
-import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, PanelLeft, PanelLeftClose, Menu } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
-// import Gallery from './components/Gallery';
-const ThumbnailStudio = lazy(() => import('./components/ThumbnailStudio'));
-const SaaShortsTab = lazy(() => import('./components/SaaShortsTab'));
-const UGCGallery = lazy(() => import('./components/UGCGallery'));
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import ClipEditor from './components/ClipEditor';
 import ReframeEditor from './components/ReframeEditor';
@@ -17,9 +13,6 @@ import StarBanner from './components/StarBanner';
 import PlanChoiceModal from './components/PlanChoiceModal';
 import TrialUpgradeModal from './components/TrialUpgradeModal';
 import LoginModal from './components/LoginModal';
-import TrialGate from './components/TrialGate';
-import AdvancedBanner from './components/AdvancedBanner';
-const HistoryTab = lazy(() => import('./components/HistoryTab'));
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
 import EnvSettings from './components/EnvSettings';
@@ -56,7 +49,7 @@ const decrypt = (text) => {
         String.fromCharCode(c.charCodeAt(0) ^ SECRET_KEY.charCodeAt(i % SECRET_KEY.length))
       ).join('');
       return result;
-    } catch (e) {
+    } catch {
       // Fallback if decryption fails (might be old plain text)
       return '';
     }
@@ -239,6 +232,25 @@ function App() {
     try { return localStorage.getItem('os_social_nudge_dismissed') === '1'; } catch (_) { return false; }
   });
   const [showKeyModal, setShowKeyModal] = useState(false);
+  // Whether the server's own .env already holds an AI configuration (LLM_PROVIDER,
+  // LLM_BASE_URL, or GEMINI_API_KEY). Lets .env-only setups skip the browser gate.
+  const [serverHasKey, setServerHasKey] = useState(null);
+  const refreshServerKey = async () => {
+    try {
+      const d = await apiJson('/api/env');
+      const env = d.env || {};
+      const s = d.secretsSet || {};
+      const hasLlm = !!(
+        env.LLM_PROVIDER ||
+        env.LLM_BASE_URL ||
+        env.LLM_MODEL ||
+        s.LLM_API_KEY ||
+        s.GEMINI_API_KEY
+      );
+      setServerHasKey(hasLlm);
+    } catch { /* backend down — fail open, the job call will surface it */ }
+  };
+  useEffect(() => { refreshServerKey(); }, []);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('os_sidebar_collapsed') === '1'; } catch (_) { return false; }
   });
@@ -357,21 +369,7 @@ function App() {
     handleClipStateChange(index, { activeLayers: null, serverVideoFile: newFile });
   };
 
-  // Reopen an archived project from the History tab: the backend re-downloads
-  // its files from R2 into the server's working dir and returns the full state.
-  const restoreProject = async (projectJobId) => {
-    const data = await apiJson(`/api/projects/${projectJobId}/restore`, { method: 'POST' });
-    flushClipState();
-    setProjectState(data.project_state || null);
-    setNoSource(true);
-    setJobId(data.job_id);
-    setResults(data.result || null);
-    setLogs(['♻️ Project restored from your library.']);
-    setProcessingMedia(null);
-    setQualityGate(null);
-    setStatus('complete');
-    setActiveTab('dashboard');
-  };
+
 
   // Apply one subtitle style to every clip of the job, sequentially.
   const handleBulkSubtitles = async (options) => {
@@ -461,13 +459,13 @@ function App() {
         else if (!session.noSource) setProcessingMedia({ type: 'server', payload: `/api/source/${session.jobId}` });
         if (session.noSource) setNoSource(true);
         if (session.projectState) setProjectState(session.projectState);
-        if (session.activeTab) setActiveTab(session.activeTab);
+        if (session.activeTab === 'dashboard' || session.activeTab === 'settings') setActiveTab(session.activeTab);
         // If was processing, resume polling; if complete/error, just show results
         setStatus(session.status === 'processing' ? 'processing' : session.status);
         setSessionRecovered(true);
         setTimeout(() => setSessionRecovered(false), 5000);
       }
-    } catch (e) {
+    } catch {
       localStorage.removeItem(SESSION_KEY);
     }
   }, []);
@@ -496,7 +494,7 @@ function App() {
         timestamp: Date.now()
       };
       localStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
-    } catch (e) {
+    } catch {
       // localStorage full or serialization error - ignore
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -541,9 +539,10 @@ function App() {
     try { localStorage.setItem('os_sidebar_collapsed', sidebarCollapsed ? '1' : '0'); } catch (_) { /* ignore */ }
   }, [sidebarCollapsed]);
 
-  // Close mobile drawer when tab changes
+  // Close mobile drawer when tab changes + re-check server key on dashboard
   useEffect(() => {
     setSidebarMobileOpen(false);
+    if (activeTab === 'dashboard') refreshServerKey();
   }, [activeTab]);
 
   // Esc closes mobile drawer
@@ -602,7 +601,7 @@ function App() {
           console.error("Polling error", e);
           if (e?.status === 404) {
             clearInterval(interval);
-            try { localStorage.removeItem(SESSION_KEY); } catch {}
+            try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
             if (status === 'processing') {
               setStatus('error');
               setLogs(prev => [...prev, "Job session expired or not found on server."]);
@@ -640,11 +639,13 @@ function App() {
     }
   };
 
-  // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
-  // Clips-only local mode: only the AI key (Gemini or OpenRouter) is required;
-  // Upload-Post/social is optional and disabled when DISABLE_YOUTUBE_URL is on.
-  const keysMissing = !billingEnabled && !apiKey;
-  const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
+  // Hosted is paid-only (no BYOK core). Self-host uses BYOK / local LLM.
+  // Local mode: Ollama (default), OpenAI-compatible, or Gemini.
+  // Ollama default is local and does not strictly require an API key.
+  const localProvider = localStorage.getItem('llm_provider') || 'ollama';
+  const hasLocalConfig = localProvider === 'ollama' || !!apiKey;
+  const keysMissing = !billingEnabled && !hasLocalConfig && serverHasKey === false;
+  // Cloud plan state lives in useAuth/me/plan; local builds skip it.
 
   // Fresh sign-up: show the welcome plan-choice popup once (AuthContext set the
   // flag after the auth redirect). Fires for free users too, so it's gated on
@@ -659,13 +660,7 @@ function App() {
       }
     }
   }, [billingEnabled, isSignedIn]);
-  // Included in the plan (fully managed, no keys): Clip Generator + YouTube Studio.
-  // Advanced (bring your own fal.ai + ElevenLabs keys): AI Shorts + AI Agent.
-  const INCLUDED_TOOL_TABS = ['dashboard', 'thumbnails'];
-  const ADVANCED_TOOL_TABS = ['saasshorts', 'ai-agent'];
-  const TOOL_NAMES = { dashboard: 'the Clip Generator', thumbnails: 'the YouTube Studio' };
-  const gateThisTab = needsPlan && INCLUDED_TOOL_TABS.includes(activeTab);      // included tool, no plan yet
-  const advancedThisTab = billingEnabled && ADVANCED_TOOL_TABS.includes(activeTab); // BYOK-notice tools
+  // Local single-purpose tool: Clip Generator only, no plan gates.
 
   // Social nudge visibility: managed users with clips on screen and no network
   // connected yet. userProfiles being empty (not yet fetched / none created)
@@ -688,7 +683,7 @@ function App() {
       const { access_url } = await apiJson('/api/social/connect', { method: 'POST' });
       // Same tab so the connect page's redirectUrl brings the user back into the app.
       if (access_url) window.location.href = access_url;
-    } catch (e) {
+    } catch {
       alert('Could not open the connection page. Please try again.');
     }
   };
@@ -699,7 +694,7 @@ function App() {
     try {
       const { access_url } = await apiJson('/api/social/connect', { method: 'POST' });
       if (access_url) window.open(access_url, '_blank', 'noopener');
-    } catch (e) {
+    } catch {
       alert('Could not open the calendar. Please try again.');
     }
   };
@@ -725,21 +720,20 @@ function App() {
 
     try {
       let body;
-      // BYOK sends the AI key header; auto-detect OpenRouter (sk-or-*) vs Gemini.
-      // The backend also accepts X-OpenRouter-Key explicitly.
-      const isOR = apiKey && (apiKey.trim().startsWith('sk-or-v1-') || apiKey.trim().startsWith('sk-or-'));
+      // AI provider configuration (Ollama, OpenAI-compatible, or Gemini)
       const headers = {};
-      if (apiKey) {
-        if (isOR) {
-          headers['X-OpenRouter-Key'] = apiKey;
-          // Also send a selected model if user chose one (stored in localStorage)
-          try {
-            const m = localStorage.getItem('openrouter_model');
-            if (m) headers['X-OpenRouter-Model'] = m;
-          } catch {}
-        } else {
-          headers['X-Gemini-Key'] = apiKey;
-        }
+      const llmProvider = localStorage.getItem('llm_provider') || 'ollama';
+      const llmBaseUrl = localStorage.getItem('llm_base_url');
+      const llmModel = localStorage.getItem('llm_model');
+      const llmKey = localStorage.getItem('llm_api_key') || apiKey;
+
+      if (llmProvider === 'gemini') {
+        if (apiKey) headers['X-Gemini-Key'] = apiKey;
+      } else {
+        headers['X-LLM-Provider'] = llmProvider;
+        if (llmBaseUrl) headers['X-LLM-Base-Url'] = llmBaseUrl;
+        if (llmModel) headers['X-LLM-Model'] = llmModel;
+        if (llmKey) headers['X-LLM-Key'] = llmKey;
       }
 
       // Advanced generation controls: only sent when the user set them, so the
@@ -754,11 +748,11 @@ function App() {
         auto_hook_style: data.autoHook ? (data.autoHookStyle || 'classic') : null,
       };
 
-      if (data.type === 'url') {
+      if (data.type === 'url' && !data.transcriptFile) {
         headers['Content-Type'] = 'application/json';
         body = JSON.stringify({
           url: data.payload,
-          acknowledged: !!data.acknowledged,
+          acknowledged: true,
           output_format: data.outputFormat || 'auto',
           force_low_quality: forceLowQuality,
           ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
@@ -769,15 +763,20 @@ function App() {
         headers['Content-Type'] = 'application/json';
         body = JSON.stringify({
           thumbnail_session_id: data.payload,
-          acknowledged: !!data.acknowledged,
+          acknowledged: true,
           output_format: data.outputFormat || 'auto',
           ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
         });
       } else {
+        // File upload, or a URL paired with a transcript file: multipart
+        // carries the video/URL plus the transcript in one request.
         const formData = new FormData();
-        formData.append('file', data.payload);
-        formData.append('acknowledged', data.acknowledged ? 'true' : 'false');
+        if (data.type === 'url') formData.append('url', data.payload);
+        else formData.append('file', data.payload);
+        if (data.transcriptFile) formData.append('transcript', data.transcriptFile);
+        formData.append('acknowledged', 'true');
         formData.append('output_format', data.outputFormat || 'auto');
+        if (forceLowQuality) formData.append('force_low_quality', 'true');
         for (const [k, v] of Object.entries(advanced)) {
           if (v != null) formData.append(k, v);
         }
@@ -839,12 +838,7 @@ function App() {
   const Sidebar = () => {
     const navItems = [
       { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator' },
-      { id: 'saasshorts', ord: '02', icon: Sparkles, label: 'AI Shorts', byok: true },
-      { id: 'ai-agent', ord: '03', icon: Bot, label: 'AI Agent', byok: true },
-      { id: 'ugc-gallery', ord: '04', icon: LayoutGrid, label: 'UGC Gallery' },
-      { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio' },
-      ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '06', icon: History, label: 'History' }] : []),
-      { id: 'settings', ord: '07', icon: Settings, label: 'Settings' },
+      { id: 'settings', ord: '02', icon: Settings, label: 'Settings' },
     ];
     const isCollapsed = sidebarCollapsed;
 
@@ -1050,11 +1044,11 @@ function App() {
               <button
                 onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : setActiveTab('settings'))}
                 className="badge-warn hover:brightness-125 transition-all"
-                title="Configure AI API key (Gemini or OpenRouter free)"
+                title="Configure AI model (Ollama local, OpenAI-compatible, or Gemini)"
               >
                 <AlertTriangle size={12} />
-                <span className="hidden sm:inline">AI API Key Missing (Gemini or OpenRouter)</span>
-                <span className="sm:hidden">key missing</span>
+                <span className="hidden sm:inline">AI Model Not Configured</span>
+                <span className="sm:hidden">ai missing</span>
               </button>
             )}
           </div>
@@ -1066,9 +1060,9 @@ function App() {
             <div className="flex items-center gap-3 text-sm text-ink2">
               <KeyRound size={16} className="shrink-0 text-warn" />
               <div>
-                <span className="font-medium text-ink">AI API key missing.</span>{' '}
+                <span className="font-medium text-ink">AI model not configured.</span>{' '}
                 <span className="text-muted">
-                  Set your Gemini or OpenRouter (free) API key in Settings to generate clips.
+                  Configure Ollama (local default), an OpenAI-compatible endpoint, or Gemini in Settings to generate clips.
                 </span>
               </div>
             </div>
@@ -1094,12 +1088,6 @@ function App() {
             </button>
           </div>
         )}
-
-        {/* Included tools (Clip Generator, YouTube Studio): non-blocking trial prompt. */}
-        {gateThisTab && <TrialGate toolName={TOOL_NAMES[activeTab] || 'this'} />}
-
-        {/* Advanced tools (AI Shorts, AI Agent): BYOK fal.ai + ElevenLabs notice. */}
-        {advancedThisTab && <AdvancedBanner needsPlan={needsPlan} onKeys={() => setActiveTab('settings')} />}
 
         {/* Main Workspace */}
         <div className="flex-1 overflow-hidden relative">
@@ -1337,173 +1325,6 @@ function App() {
               </div>
             </div>
           )}
-
-          {/* View: SaaS Shorts */}
-          {activeTab === 'saasshorts' && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full p-8"><Loader2 className="animate-spin text-muted" size={24} aria-label="loading" /></div>}>
-              <SaaShortsTab geminiApiKey={apiKey} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
-            </Suspense>
-          )}
-
-          {/* View: AI Agent */}
-          {activeTab === 'ai-agent' && (
-            <div className="h-full overflow-y-auto custom-scrollbar p-4 sm:p-6 md:p-10 animate-fade">
-              <div className="max-w-4xl mx-auto space-y-8">
-
-                {/* Header */}
-                <div className="space-y-3">
-                  <p className="eyebrow flex items-center gap-2">
-                    <Bot size={12} /> 03 · AI AGENT · AUTONOMOUS SKILL
-                  </p>
-                  <h1 className="font-display lowercase text-3xl md:text-4xl text-ink">
-                    Your Personal Clipping Team
-                  </h1>
-                  <p className="text-muted text-base md:text-lg leading-relaxed max-w-2xl">
-                    Drop your videos in a folder and a team of AI clippers picks the viral moments, edits them, and queues them for your approval — like having a 24/7 short-form editing crew on autopilot.
-                  </p>
-                </div>
-
-                {/* Mobile-format warning */}
-                <div className="px-4 py-3 rounded-card border border-rule bg-paper2 flex items-start gap-3">
-                  <Smartphone size={18} className="text-warn shrink-0 mt-0.5" />
-                  <div className="text-sm text-ink2">
-                    <p className="font-medium text-ink mb-1">Upload videos already in vertical (9:16) mobile format.</p>
-                    <p className="text-muted leading-relaxed">
-                      The agent does not reframe horizontal footage. Make sure every source video is shot or pre-cropped to mobile/portrait format before dropping it into the input folder.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Workflow */}
-                <div className="grid md:grid-cols-3 gap-4">
-                  <div className="card p-5 space-y-2">
-                    <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
-                      <Upload size={18} className="text-brass" />
-                    </div>
-                    <h3 className="font-medium text-ink lowercase">1. Drop your videos</h3>
-                    <p className="text-xs text-muted leading-relaxed">
-                      Put your long-form vertical footage in the watched folder. The skill picks one video per run.
-                    </p>
-                  </div>
-
-                  <div className="card p-5 space-y-2">
-                    <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
-                      <Users size={18} className="text-brass" />
-                    </div>
-                    <h3 className="font-medium text-ink lowercase">2. AI clippers work</h3>
-                    <p className="text-xs text-muted leading-relaxed">
-                      Whisper transcribes, Gemini 3 Flash spots viral beats, FFmpeg cuts each clip and adds a hook overlay.
-                    </p>
-                  </div>
-
-                  <div className="card p-5 space-y-2">
-                    <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
-                      <CheckCircle2 size={18} className="text-brass" />
-                    </div>
-                    <h3 className="font-medium text-ink lowercase">3. You validate, it ships</h3>
-                    <p className="text-xs text-muted leading-relaxed">
-                      Approve the candidates you like and the skill auto-publishes them to TikTok, Reels and YouTube Shorts via Upload-Post.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Repo CTA */}
-                <div className="card p-6 md:p-8 space-y-5">
-                  <div className="flex items-start justify-between gap-4 flex-wrap">
-                    <div>
-                      <h2 className="font-display lowercase text-xl text-ink mb-1">skill-autoshorts</h2>
-                      <p className="text-sm text-muted">
-                        The Claude Code skill that powers this workflow. Install it once and trigger it whenever you want a fresh batch of clips.
-                      </p>
-                    </div>
-                    <a
-                      href="https://github.com/mutonby/skill-autoshorts"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="btn-primary py-2 px-4 text-sm shrink-0"
-                    >
-                      View on GitHub <ExternalLink size={14} />
-                    </a>
-                  </div>
-
-                  <div className="bg-paper border border-rule rounded-card p-4 font-mono text-xs text-ink2 flex items-center justify-between gap-3">
-                    <span className="truncate">git clone https://github.com/mutonby/skill-autoshorts</span>
-                    <button
-                      onClick={() => navigator.clipboard.writeText('git clone https://github.com/mutonby/skill-autoshorts')}
-                      className="text-muted hover:text-ink transition-colors shrink-0"
-                      title="Copy"
-                    >
-                      <Copy size={14} />
-                    </button>
-                  </div>
-
-                  <div className="grid sm:grid-cols-2 gap-3 text-sm">
-                    <div className="flex items-start gap-2 text-ink2">
-                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
-                      <span>Daily batch — picks one long video per run</span>
-                    </div>
-                    <div className="flex items-start gap-2 text-ink2">
-                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
-                      <span>Whisper transcription with word-level timing</span>
-                    </div>
-                    <div className="flex items-start gap-2 text-ink2">
-                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
-                      <span>Gemini 3 Flash multimodal moment detection</span>
-                    </div>
-                    <div className="flex items-start gap-2 text-ink2">
-                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
-                      <span>Auto-publish to TikTok, Reels & YouTube Shorts</span>
-                    </div>
-                  </div>
-                </div>
-
-              </div>
-            </div>
-          )}
-
-          {/* View: UGC Gallery */}
-          {activeTab === 'ugc-gallery' && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full p-8"><Loader2 className="animate-spin text-muted" size={24} aria-label="loading gallery" /></div>}>
-              <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
-                <div className="max-w-6xl mx-auto p-6 md:p-8">
-                  <UGCGallery />
-                </div>
-              </div>
-            </Suspense>
-          )}
-
-          {/* View: History */}
-          {activeTab === 'history' && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full p-8"><Loader2 className="animate-spin text-muted" size={24} aria-label="loading history" /></div>}>
-              <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
-                <div className="max-w-6xl mx-auto p-6 md:p-8">
-                  <HistoryTab onReopenProject={restoreProject} />
-                </div>
-              </div>
-            </Suspense>
-          )}
-
-          {activeTab === 'thumbnails' && (
-            <Suspense fallback={<div className="flex items-center justify-center h-full p-8"><Loader2 className="animate-spin text-muted" size={24} aria-label="loading studio" /></div>}>
-              <ThumbnailStudio
-                geminiApiKey={apiKey}
-                uploadPostKey={uploadPostKey}
-                uploadUserId={uploadUserId}
-                managed={isManaged}
-                onCreateClips={(sessionId) => {
-                  setActiveTab('dashboard');
-                  // The Studio source is the user's own upload, published to their
-                  // own channel; the handover carries that same attestation.
-                  handleProcess({ type: 'thumbnail_session', payload: sessionId, acknowledged: true });
-                }}
-              />
-            </Suspense>
-          )}
-
-          {/* View: Gallery */}
-          {/* {activeTab === 'gallery' && (
-            <Gallery />
-          )} */}
 
           {/* View: Dashboard (Idle) */}
           {activeTab === 'dashboard' && status === 'idle' && (

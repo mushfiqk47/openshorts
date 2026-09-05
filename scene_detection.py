@@ -21,7 +21,17 @@ Environment variables:
 
 import os
 import subprocess
+import sys
 import threading
+
+# Windows cp1252 can't encode emojis; force utf-8 for prints
+for _s in ("stdout", "stderr"):
+    _st = getattr(sys, _s, None)
+    if _st and hasattr(_st, "reconfigure"):
+        try:
+            _st.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 import cv2
 import numpy as np
@@ -90,7 +100,7 @@ def _extract_frames_small(video_path):
     if n == 0:
         raise RuntimeError("ffmpeg produced no frames")
     return np.frombuffer(proc.stdout[:n * frame_bytes],
-                         dtype=np.uint8).reshape(n, _TN2_H, _TN2_W, 3)
+                         dtype=np.uint8).copy().reshape(n, _TN2_H, _TN2_W, 3)
 
 
 def _detect_transnetv2(video_path):

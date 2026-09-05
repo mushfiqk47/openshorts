@@ -1,93 +1,50 @@
-import { StrictMode, useState, useEffect } from 'react'
+import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
-import Landing from './Landing.jsx'
-import Legal from './Legal.jsx'
-import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { AuthProvider } from './contexts/AuthContext'
 import { capture as captureAttribution } from './lib/attribution'
-import PricingPage from './components/PricingPage'
-import AccountPage from './components/AccountPage'
-import LoginModal from './components/LoginModal'
 
-function PageShell({ title, children }) {
-  return (
-    <div className="min-h-screen bg-paper text-ink2">
-      <header className="h-16 border-b border-rule bg-paper flex items-center justify-between px-6">
-        <a href="#app" className="font-display lowercase text-lg text-ink">OpenShorts</a>
-        <a href="#app" className="text-sm lowercase text-muted hover:text-ink transition-colors">← Back to app</a>
-      </header>
-      <main className="p-8">
-        {title && <h1 className="font-display lowercase text-3xl text-ink text-center mb-10">{title}</h1>}
-        {children}
-      </main>
-    </div>
-  );
-}
-
-function PricingView() {
-  const [showLogin, setShowLogin] = useState(false);
-  return (
-    <PageShell>
-      <PricingPage onRequireLogin={() => setShowLogin(true)} />
-      {showLogin && <LoginModal onClose={() => setShowLogin(false)} />}
-    </PageShell>
-  );
-}
-
-function AccountView() {
-  const { isSignedIn, loading } = useAuth();
-  useEffect(() => {
-    if (!loading && !isSignedIn) window.location.hash = '#/pricing';
-  }, [loading, isSignedIn]);
-  return <PageShell><AccountPage /></PageShell>;
-}
-
-function Root() {
-  const resolveView = () => {
-    const hash = window.location.hash || '';
-    if (hash.startsWith('#/auth/')) return 'auth';       // AuthContext consumes then redirects
-    if (hash.startsWith('#/account')) return 'account';
-    if (hash.startsWith('#/pricing')) return 'pricing';
-    if (hash === '#legal') return 'legal';
-    // #landing = explicit landing view (app logo); section anchors keep the landing mounted
-    if (['#landing', '#features', '#how-it-works', '#pricing', '#comparison', '#faq'].includes(hash)) return 'landing';
-    if (hash === '#app' || localStorage.getItem('openshorts_skip_landing') === '1') return 'app';
-    return 'landing';
-  };
-
-  const [view, setView] = useState(resolveView);
-
-  useEffect(() => {
-    const handleHashChange = () => setView(resolveView());
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
-  }, []);
-
-  const handleLaunchApp = () => {
-    localStorage.setItem('openshorts_skip_landing', '1');
-    window.location.hash = '#app';
-    setView('app');
-  };
-
-  if (view === 'legal') return <Legal />;
-  if (view === 'pricing') return <PricingView />;
-  if (view === 'account') return <AccountView />;
-  if (view === 'auth') {
-    return <div className="min-h-screen flex items-center justify-center bg-background text-zinc-400">Signing you in…</div>;
-  }
-  if (view === 'app') return <App />;
-  return <Landing onLaunchApp={handleLaunchApp} />;
-}
+// Single-purpose local tool: boot straight into the Clip Generator.
+// No landing page, no marketing routing.
 
 // Before React mounts: AuthContext rewrites the URL on auth redirects, which
 // would destroy the referrer and any UTM params we still need to read.
 captureAttribution();
 
-createRoot(document.getElementById('root')).render(
-  <StrictMode>
-    <AuthProvider>
-      <Root />
-    </AuthProvider>
-  </StrictMode>,
-)
+// Never leave a silent black screen: surface boot crashes as readable text.
+function showBootError(message) {
+  const root = document.getElementById('root');
+  if (root) {
+    root.innerHTML =
+      '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;' +
+      'background:#0c0c0e;color:#f5f2ea;font-family:system-ui,sans-serif;padding:24px;text-align:center">' +
+      '<div><div style="font-size:15px;font-weight:600;margin-bottom:8px">OpenShorts failed to start</div>' +
+      '<div style="font-size:13px;opacity:.7;max-width:520px">' + message + '</div>' +
+      '<div style="font-size:12px;opacity:.5;margin-top:12px">Open DevTools console for the full error. ' +
+      'Backend must run on :8000 — start it with `python main.py`.</div></div></div>';
+  }
+}
+window.addEventListener('error', (e) => {
+  if (!document.getElementById('root')?.hasChildNodes()) {
+    showBootError(String(e.message || e.error || 'JavaScript error during load.'));
+  }
+});
+window.addEventListener('unhandledrejection', (e) => {
+  if (!document.getElementById('root')?.hasChildNodes()) {
+    showBootError(String(e.reason?.message || e.reason || 'Failed to load.'));
+  }
+});
+
+try {
+  createRoot(document.getElementById('root')).render(
+    <StrictMode>
+      <AuthProvider>
+        <App />
+      </AuthProvider>
+    </StrictMode>,
+  );
+} catch (err) {
+  console.error(err);
+  showBootError(String(err?.message || err));
+}

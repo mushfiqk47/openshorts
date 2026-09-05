@@ -4,12 +4,15 @@ import { getApiUrl } from '../config';
 
 const GROUPS = [
   {
-    title: 'AI Keys',
-    desc: 'Also saved to .env so the backend uses them without the browser header. Changing here writes the file immediately.',
+    title: 'AI / LLM Settings',
+    desc: 'Ollama (default) or any OpenAI-compatible base model. Saved to .env and applied live.',
     fields: [
-      { key: 'OPENROUTER_API_KEY', label: 'OpenRouter API Key', placeholder: 'sk-or-v1-...', secret: true },
-      { key: 'OPENROUTER_MODEL', label: 'OpenRouter Model', placeholder: 'z-ai/glm-5.2:free', choices: null },
-      { key: 'GEMINI_API_KEY', label: 'Gemini API Key', placeholder: 'AIza...', secret: true },
+      { key: 'LLM_PROVIDER', label: 'AI Provider', choices: ['ollama', 'openai_compatible', 'gemini'] },
+      { key: 'LLM_BASE_URL', label: 'Base URL', placeholder: 'http://localhost:11434/v1' },
+      { key: 'LLM_MODEL', label: 'Model Name', placeholder: 'llama3.2:1b' },
+      { key: 'LLM_API_KEY', label: 'API Key (Optional for Ollama)', placeholder: 'ollama or sk-...', secret: true },
+      { key: 'GEMINI_API_KEY', label: 'Gemini API Key (Fallback)', placeholder: 'AIza...', secret: true },
+      { key: 'GEMINI_MODEL', label: 'Gemini Model', placeholder: 'gemini-2.5-flash-lite' },
     ],
   },
   {
@@ -17,10 +20,7 @@ const GROUPS = [
     desc: 'GPU-first: auto uses GPU when available, CPU otherwise. Pin to cuda/x264 to force.',
     fields: [
       { key: 'FFMPEG_ENCODER', label: 'Video Encoder', choices: ['auto', 'nvenc', 'x264'] },
-      { key: 'WHISPER_DEVICE', label: 'Whisper Device', choices: ['auto', 'cuda', 'cpu'] },
-      { key: 'WHISPER_COMPUTE', label: 'Whisper Compute', choices: ['auto', 'float16', 'float32', 'int8', 'int8_float16'] },
       { key: 'YOLO_DEVICE', label: 'YOLO Device', choices: ['auto', 'cuda', 'cpu'] },
-      { key: 'WHISPER_MODEL', label: 'Whisper Model', placeholder: 'small', choices: ['small', 'base', 'medium', 'large-v3-turbo'] },
     ],
   },
   {
@@ -28,7 +28,6 @@ const GROUPS = [
     desc: 'Tuning knobs — saved to .env and applied live (no restart).',
     fields: [
       { key: 'CLIP_WORKERS', label: 'Clip Workers', placeholder: '2' },
-      { key: 'ASR_GPU_CONCURRENCY', label: 'ASR GPU Concurrency', placeholder: '1' },
       { key: 'DISABLE_YOUTUBE_URL', label: 'Disable YouTube URL', choices: ['true', 'false'] },
     ],
   },

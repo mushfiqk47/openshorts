@@ -21,7 +21,7 @@ _RULES = [
     # Worker/job lifecycle + errors: keep, minus any paths.
     (re.compile(r'^(Job started|Process finished|Process failed|'
                 r'Execution error|No metadata|❌)'), None),
-    # Live transcription progress emitted by transcribe_backends.
+    # Transcription progress lines (kept for backward-compatible logs).
     (re.compile(r'^🎙️ Transcribing… \d+%'), None),
     (re.compile(r'Transcribing (video|audio)'), '🎙️ Transcribing audio…'),
     (re.compile(r'Found (\d+) viral clips'), '🔥 Found {0} viral clips!'),

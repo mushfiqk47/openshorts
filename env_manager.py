@@ -9,7 +9,7 @@ This module makes the file the single source of truth:
   - GET /api/env reads the live file + os.environ (so manual edits are seen)
   - PUT /api/env writes through dotenv.set_key, updates os.environ in-process,
     and resets the caches that memoize env-dependent choices (NVENC probe,
-    whisper singleton, etc.) so the change is live without a restart.
+    etc.) so the change is live without a restart.
 
 Only keys in ALLOWED_ENV are writable via the API — secrets like AWS keys
 and billing Stripe keys stay file-only on purpose.
@@ -23,20 +23,14 @@ ENV_PATH = Path(__file__).parent / ".env"
 
 # Keys the dashboard is allowed to read/write. Masking and validation below.
 ALLOWED_ENV = {
-    # AI keys / models
-    "OPENROUTER_API_KEY",
-    "OPENROUTER_MODEL",
-    "OPENROUTER_REFERER",
-    "OPENROUTER_TITLE",
+    # AI keys / models (Ollama & OpenAI-compatible base model, or Gemini)
+    "LLM_PROVIDER",
+    "LLM_BASE_URL",
+    "LLM_MODEL",
+    "LLM_API_KEY",
     "GEMINI_API_KEY",
     "GEMINI_MODEL",
-    # Transcription (GPU-first)
-    "WHISPER_MODEL",
-    "WHISPER_DEVICE",
-    "WHISPER_COMPUTE",
-    "TRANSCRIBE_BACKEND",
-    "WHISPER_FORCE_GPU",
-    "ASR_GPU_CONCURRENCY",
+    # Transcription is user-supplied (--transcript file); no WHISPER_* vars.
     # Video encode / vision (GPU-first)
     "FFMPEG_ENCODER",
     "YOLO_DEVICE",
@@ -53,18 +47,15 @@ ALLOWED_ENV = {
 
 # Validation rules for values that have a closed set
 VALID_CHOICES = {
-    "WHISPER_DEVICE": {"auto", "cuda", "cpu"},
-    "WHISPER_COMPUTE": {"auto", "float16", "float32", "int8", "int8_float16"},
-    "TRANSCRIBE_BACKEND": {"whisper", "parakeet"},
+    "LLM_PROVIDER": {"ollama", "openai_compatible", "openai", "gemini"},
     "FFMPEG_ENCODER": {"auto", "nvenc", "x264"},
     "YOLO_DEVICE": {"auto", "cuda", "cpu"},
     "TRANSNETV2_DEVICE": {"auto", "cuda", "cpu"},
     "DISABLE_YOUTUBE_URL": {"true", "false", "1", "0", "yes", "no"},
-    "WHISPER_FORCE_GPU": {"0", "1", "true", "false"},
 }
 
 # Keys whose values are secrets — returned masked on GET, never logged
-SECRET_KEYS = {"OPENROUTER_API_KEY", "GEMINI_API_KEY"}
+SECRET_KEYS = {"LLM_API_KEY", "GEMINI_API_KEY"}
 
 def _mask(value: str) -> str:
     if not value:
@@ -108,7 +99,7 @@ def validate_updates(updates: dict) -> dict:
         if k in VALID_CHOICES and v_str.lower() not in VALID_CHOICES[k]:
             errors[k] = f"must be one of {sorted(VALID_CHOICES[k])}"
         # Numeric validation for a few keys
-        if k in {"CLIP_WORKERS", "ASR_GPU_CONCURRENCY", "MAX_CONCURRENT_JOBS", "MAX_FILE_SIZE_MB"}:
+        if k in {"CLIP_WORKERS", "MAX_CONCURRENT_JOBS", "MAX_FILE_SIZE_MB"}:
             try:
                 ival = int(v_str)
                 if ival < 1 or ival > 64:
@@ -148,15 +139,6 @@ def apply_updates(updates: dict):
     try:
         import ffmpeg_utils
         ffmpeg_utils.reset_encoder_cache()
-    except Exception:
-        pass
-    # Whisper singleton holds device/compute in its key — force rebuild on next transcribe
-    try:
-        import transcribe_backends
-        import threading as _th
-        with transcribe_backends._whisper_lock:
-            transcribe_backends._whisper_model = None
-            transcribe_backends._whisper_force_cpu = False
     except Exception:
         pass
 

@@ -55,7 +55,7 @@ export default function TopUpModal({ onClose, required, remaining, context = 'wa
         setTopups(d.topups || []);
       })
       .catch(() => {});
-  }, []);
+  }, [isUpsell, required, remaining]);
 
   // Instrumented in three steps on purpose. Between 25-jul and 1-ago the modals
   // logged 35 checkout clicks and Stripe recorded ONE new subscription, and

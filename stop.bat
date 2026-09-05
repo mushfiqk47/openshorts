@@ -9,8 +9,13 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5175" ^| findstr "LISTENING
   echo Killing PID %%a on :5175
   taskkill /F /PID %%a >nul 2>nul
 )
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3100" ^| findstr "LISTENING"') do (
+  echo Killing PID %%a on :3100
+  taskkill /F /PID %%a >nul 2>nul
+)
 REM Also kill window titles if netstat missed
 taskkill /FI "WINDOWTITLE eq OpenShorts Backend*" /F >nul 2>nul
 taskkill /FI "WINDOWTITLE eq OpenShorts Frontend*" /F >nul 2>nul
+taskkill /FI "WINDOWTITLE eq OpenShorts Renderer*" /F >nul 2>nul
 echo Done.
 pause

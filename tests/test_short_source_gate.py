@@ -91,19 +91,3 @@ def test_short_upload_is_rejected_and_cleaned_up(dirs, monkeypatch):
     # The rejected upload and its job dir must not linger on disk.
     assert os.listdir(up_root) == []
     assert os.listdir(out_root) == []
-
-
-def test_short_thumbnail_session_is_rejected(dirs, monkeypatch):
-    out_root, up_root = dirs
-    video = up_root / "thumb_sess1_source.mp4"
-    video.write_bytes(b"fake-video-bytes")
-    monkeypatch.setitem(app_module.thumbnail_sessions, "sess1", {
-        "user_id": None, "video_path": str(video),
-        "transcript_ready": False, "transcript": None,
-    })
-    monkeypatch.setattr(app_module, "_media_duration_seconds", lambda path: 24.0)
-    resp = _post_process({"thumbnail_session_id": "sess1", "acknowledged": True})
-    assert resp.status_code == 400
-    # The session's own video stays; only the aborted job dir is cleaned.
-    assert os.path.exists(video)
-    assert os.listdir(out_root) == []

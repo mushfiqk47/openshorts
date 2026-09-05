@@ -13,6 +13,42 @@ for _stream_name in ("stdout", "stderr"):
         except Exception:
             pass
 
+# `python main.py` with no clip args starts the API server (same as
+# `python -m uvicorn app:app`). Clip mode still uses the argparse CLI at the
+# bottom: `python main.py -i video.mp4 --transcript video.srt`.
+# This block runs BEFORE the heavy ML imports so `python main.py` boots fast.
+if __name__ == "__main__":
+    _argv = sys.argv[1:]
+    _clip_flags = {
+        "-i", "--input", "-u", "--url", "--skip-analysis",
+        "--transcript", "-o", "--output", "--format",
+        "--keep-original", "-h", "--help",
+    }
+    _has_clip_arg = any(
+        a in _clip_flags or a.startswith("--transcript=") or a.startswith("--format=")
+        for a in _argv
+    )
+    if "--serve" in _argv or not _has_clip_arg:
+        import argparse as _ap
+        _p = _ap.ArgumentParser(description="OpenShorts backend (API server).")
+        _p.add_argument("--serve", action="store_true", help="Start the API server.")
+        _p.add_argument("--host", default="0.0.0.0", help="Bind host (default 0.0.0.0).")
+        _p.add_argument("--port", type=int, default=int(__import__("os").environ.get("PORT", "8000")),
+                        help="Bind port (default $PORT or 8000).")
+        _p.add_argument("--reload", action="store_true", help="Uvicorn auto-reload (dev only).")
+        _args, _unknown = _p.parse_known_args(_argv)
+        for _s in ("stdout", "stderr"):
+            _st = getattr(sys, _s, None)
+            if _st and hasattr(_st, "reconfigure"):
+                try:
+                    _st.reconfigure(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+        print(f"🚀 OpenShorts API → http://localhost:{_args.port}  (docs: /docs)", flush=True)
+        print("   Tip: clip mode is still here → python main.py -i video.mp4 --transcript video.srt", flush=True)
+        __import__("uvicorn").run("app:app", host=_args.host, port=_args.port, reload=_args.reload)
+        sys.exit(0)
+
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,7 +61,6 @@ import numpy as np
 from tqdm import tqdm
 import yt_dlp
 import mediapipe as mp
-# import whisper (replaced by faster_whisper inside function)
 try:
     from google import genai
     from google.genai import types as genai_types
@@ -45,37 +80,35 @@ import json
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
 
-# OpenRouter (free model) path — optional, used when OPENROUTER_API_KEY is set
+# LLM Provider (Ollama / OpenAI-compatible path — default)
 try:
-    import openrouter_client  # noqa: F401
-    _HAS_OPENROUTER = True
+    import llm_client
+    _HAS_LLM = True
 except ImportError:
-    _HAS_OPENROUTER = False
+    _HAS_LLM = False
 
 
-def _use_openrouter() -> bool:
-    """True when an OpenRouter key is configured (env or mirrored from request)."""
-    k = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or "").strip()
-    if k:
-        return True
-    # Also accept a GEMINI_API_KEY that looks like an OpenRouter key (dashboard single field)
-    g = (os.environ.get("GEMINI_API_KEY") or "").strip()
-    return g.startswith("sk-or-v1-") or g.startswith("sk-or-")
+def _use_llm() -> bool:
+    """True when Ollama / OpenAI-compatible LLM is preferred or configured."""
+    provider = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
+    if provider in ("gemini",):
+        return False
+    # If explicit Gemini key is passed and no LLM_BASE_URL or LLM_PROVIDER is set
+    if os.environ.get("GEMINI_API_KEY") and not os.environ.get("LLM_BASE_URL") and not provider:
+        return False
+    # Default is Ollama / OpenAI-compatible
+    return _HAS_LLM
 
 
-def _openrouter_key() -> str:
-    k = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or "").strip()
-    if k:
-        return k
-    return (os.environ.get("GEMINI_API_KEY") or "").strip()
-
-
-def _openrouter_model() -> str:
+def _llm_config() -> tuple[str, str, str]:
+    """Returns (base_url, model, api_key)."""
+    if _HAS_LLM:
+        return llm_client.resolve_llm_config()
     return (
-        os.environ.get("OPENROUTER_MODEL")
-        or os.environ.get("GEMINI_MODEL")
-        or "openrouter/free"
-    ).strip() or "openrouter/free"
+        os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1"),
+        os.environ.get("LLM_MODEL", "llama3.2:1b"),
+        os.environ.get("LLM_API_KEY", "ollama"),
+    )
 
 # Load environment variables
 load_dotenv()
@@ -672,7 +705,7 @@ def truncate_bytes(text, max_bytes):
 
 def sanitize_filename(filename):
     """Remove invalid characters from filename and bound it for the filesystem."""
-    filename = re.sub(r'[<>:"/\\|?*#]', '', filename)
+    filename = re.sub(r'[<>:"/\\|?*#\x00-\x1f\uff5c]', '', filename)
     filename = filename.replace(' ', '_')
     return truncate_bytes(filename, MAX_TITLE_BYTES)
 
@@ -923,7 +956,7 @@ def finalize_clip_passthrough(input_video, final_output_video):
     return True
 
 
-def auto_caption_clip(clip_path, transcript, clip_start, clip_end):
+def auto_caption_clip(clip_path, transcript, clip_start, clip_end, style_override=None):
     """Burn the default caption style onto a finished clip.
 
     Captions are mandatory for short-form to land, but they were opt-in behind a
@@ -945,7 +978,7 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end):
         return None  # silent video: nothing to caption
     try:
         import subtitles as _subs
-        style = _subs.AUTO_CAPTION_STYLE
+        style = {**_subs.AUTO_CAPTION_STYLE, **(style_override or {})}
         output_dir = os.path.dirname(clip_path)
         stem = os.path.basename(clip_path)
         generation_id = int(time.time())
@@ -1326,25 +1359,11 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
 
     return True
 
-def transcribe_video(video_path):
-    print("🎙️  Transcribing video...")
-    from transcribe_backends import transcribe_media
-
-    transcript = transcribe_media(video_path)
-
-    print(f"   Detected language '{transcript['language']}', "
-          f"{len(transcript['segments'])} segments")
-    for segment in transcript['segments']:
-        # Print progress to keep user informed (and prevent timeouts feeling)
-        print(f"   [{segment['start']:.2f}s -> {segment['end']:.2f}s] {segment['text']}")
-
-    return transcript
-
 def _run_gemini_stage(client, model_name, prompt, schema):
     """One schema-enforced Gemini call with transient-error backoff.
     Returns (parsed_dict, cost_analysis)."""
     if genai_types is None or client is None:
-        raise RuntimeError("google-genai not installed — install google-genai or use OpenRouter")
+        raise RuntimeError("google-genai not installed — install google-genai or use Ollama / OpenAI-compatible LLM")
     config = genai_types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
@@ -1384,17 +1403,14 @@ def _run_gemini_stage(client, model_name, prompt, schema):
             time.sleep(wait)
 
 
-def _run_openrouter_stage(prompt: str, mode: str) -> tuple[dict, dict | None]:
-    """One OpenRouter call — score or detail — returning (parsed, cost)."""
-    import openrouter_client
+def _run_llm_stage(prompt: str, mode: str) -> tuple[dict, dict | None]:
+    """One LLM call — score or detail — returning (parsed, cost)."""
+    import llm_client
 
-    key = _openrouter_key()
-    model = _openrouter_model()
-    if not key:
-        raise RuntimeError("OPENROUTER_API_KEY not set")
+    base_url, model, key = _llm_config()
     # score = precise (0.2), detail = creative (0.7)
     temp = 0.2 if mode == "score" else 0.7
-    parsed, cost = openrouter_client.call_openrouter(prompt, api_key=key, model=model, temperature=temp)
+    parsed, cost = llm_client.call_llm(prompt, base_url=base_url, api_key=key, model=model, temperature=temp)
     return parsed, cost
 
 
@@ -1406,34 +1422,34 @@ def get_viral_clips(transcript_result, video_duration):
     the expensive detail reasoning focused on the shortlist. Cuts are snapped to
     word boundaries so clips don't start/end mid-word.
 
-    Routes through OpenRouter when OPENROUTER_API_KEY (or an sk-or-* Gemini key)
-    is present; otherwise uses Gemini. The same prompts and snapping are used
+    Routes through Ollama (default at http://localhost:11434/v1) or any OpenAI-compatible
+    endpoint; otherwise uses Gemini if configured. The same prompts and snapping are used
     either way so results stay comparable.
     """
-    use_or = _use_openrouter()
-    if use_or:
-        api_key = _openrouter_key()
-        model_name = _openrouter_model()
-        provider = "OpenRouter"
+    use_llm = _use_llm()
+    if use_llm:
+        base_url, model_name, api_key = _llm_config()
+        provider = "Ollama" if ("11434" in base_url or os.environ.get("LLM_PROVIDER") == "ollama") else "OpenAI-Compatible"
     else:
+        base_url = ""
         api_key = os.getenv("GEMINI_API_KEY")
         model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
         provider = "Gemini"
-    if not api_key:
-        print("❌ Error: No AI API key found. Set OPENROUTER_API_KEY (sk-or-...) for free models or GEMINI_API_KEY.")
+    if not use_llm and not api_key:
+        print("❌ Error: No AI API key found. Configure Ollama (http://localhost:11434/v1) or set GEMINI_API_KEY.")
         return None
 
-    if not use_or:
+    if not use_llm:
         if genai is None:
-            print("❌ google-genai not installed. pip install google-genai or set OPENROUTER_API_KEY")
+            print("❌ google-genai not installed. pip install google-genai or use Ollama / OpenAI-compatible LLM.")
             return None
         client = genai.Client(api_key=api_key)
     else:
         client = None
-        print(f"🤖 Using OpenRouter (free model path) — set OPENROUTER_MODEL to change it.")
+        print(f"🤖 Using {provider} ({base_url}) — model: {model_name}")
     language = str(transcript_result.get('language') or 'unknown')
-    print(f"\U0001f916 Analyzing with {provider} (2-pass: score → detail)...")
-    print(f"\U0001f916  Model: {model_name} | language: {language} | provider: {provider.lower()}")
+    print(f"🤖 Analyzing with {provider} (2-pass: score → detail)...")
+    print(f"🤖  Model: {model_name} | language: {language} | provider: {provider.lower()}")
 
     # Full word list — ground truth for snapping cut points.
     words = []
@@ -1462,8 +1478,8 @@ def get_viral_clips(transcript_result, video_duration):
             prompt = gemini_worker.SCORE_PROMPT_TEMPLATE.format(
                 video_duration=video_duration, language=language,
                 windows_json=json.dumps(payload, ensure_ascii=False))
-            if use_or:
-                parsed, cost = _run_openrouter_stage(prompt, "score")
+            if use_llm:
+                parsed, cost = _run_llm_stage(prompt, "score")
             else:
                 parsed, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.ScoreResponse)
             if cost:
@@ -1488,8 +1504,8 @@ def get_viral_clips(transcript_result, video_duration):
             min_clips=min_clips, max_clips=max_clips,
             min_secs=min_secs, max_secs=max_secs,
             windows_json=json.dumps(payload, ensure_ascii=False))
-        if use_or:
-            detail, cost = _run_openrouter_stage(prompt, "detail")
+        if use_llm:
+            detail, cost = _run_llm_stage(prompt, "detail")
         else:
             detail, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.DetailResponse)
         if cost:
@@ -1538,12 +1554,12 @@ def get_visual_clips(video_path, video_duration, language="en"):
     most engaging visual moments (no transcript). Returns the same
     {"shorts", "cost_analysis"} shape as get_viral_clips, or None.
 
-    When OpenRouter is configured, vision is not available (no video upload),
+    When using local Ollama or OpenAI-compatible LLMs (text-only), vision is not available,
     so this path returns None and the caller falls back to a hard error with a
     helpful message.
     """
-    if _use_openrouter():
-        print("🎥  Silent video — vision analysis requires Gemini (OpenRouter vision not yet wired).")
+    if _use_llm():
+        print("🎥  Silent video — vision analysis requires Gemini (local LLM vision video upload not yet wired).")
         print("   Tip: add speech/audio to the video or set a GEMINI_API_KEY for silent clips.")
         return None
     print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
@@ -1642,8 +1658,8 @@ if __name__ == '__main__':
     parser.add_argument('--skip-analysis', action='store_true', help="Skip AI analysis and convert the whole video.")
     parser.add_argument('--format', type=str, default="auto", choices=["auto", "vertical", "horizontal", "square"],
                         help="Output aspect: vertical/auto (9:16), horizontal (keep 16:9), square (1:1).")
-    parser.add_argument('--transcript', type=str,
-                        help="Path to a precomputed transcript JSON (transcribe_media shape); skips transcription.")
+    parser.add_argument('--transcript', type=str, required=False,
+                        help="Path to the transcript: .srt / .vtt / .txt / .md / .json. REQUIRED unless --skip-analysis. No auto-transcription.")
 
     args = parser.parse_args()
     output_format = args.format
@@ -1674,7 +1690,7 @@ if __name__ == '__main__':
         input_video, video_title = download_youtube_video(args.url, output_dir)
     else:
         input_video = args.input
-        video_title = os.path.splitext(os.path.basename(input_video))[0]
+        video_title = sanitize_filename(os.path.splitext(os.path.basename(input_video))[0])
         
         if args.output and not args.skip_analysis:
             # For multi-clip runs, treat --output as an OUTPUT DIRECTORY (create it if needed).
@@ -1719,29 +1735,24 @@ if __name__ == '__main__':
         duration = frame_count / fps
         cap.release()
 
-        # 3. Transcribe — unless the video has no audio, in which case fall back
-        # to Gemini vision (picks clips from the imagery instead of the speech).
-        from transcribe_backends import NoAudioError
+        # 3. Transcript (user-supplied — Whisper removed). SRT/VTT carry real
+        # cue timestamps; TXT/MD words are spread evenly across the duration.
+        # Silent / music-only videos with no transcript use Gemini vision.
+        from transcript_input import load_transcript
         transcript = None
-        # Module handover (issue #68): another module already transcribed this
-        # exact source with the same backend, so reuse its output. Any problem
-        # with the file falls back to transcribing normally rather than failing.
         if args.transcript:
             try:
-                with open(args.transcript, 'r') as f:
-                    transcript = json.load(f)
-                if not transcript.get('segments'):
-                    raise ValueError("transcript has no segments")
-                print(f"⏩ Reusing precomputed transcript "
-                      f"({len(transcript['segments'])} segments) — skipping transcription.")
-            except Exception as e:
-                print(f"⚠️ Could not use precomputed transcript ({e}) — transcribing normally.")
-                transcript = None
-        if transcript is None:
-            try:
-                transcript = transcribe_video(input_video)
-            except NoAudioError as e:
-                print(f"🔇 {e} — switching to visual analysis.")
+                transcript = load_transcript(args.transcript, duration)
+                print(f"⏩ Transcript loaded "
+                      f"({len(transcript['segments'])} segments) from {args.transcript}.")
+            except (FileNotFoundError, ValueError) as e:
+                print(f"❌ {e}")
+                exit(1)
+        elif not args.skip_analysis:
+            print("❌ No transcript provided. Whisper auto-transcription was removed —")
+            print("   run with --transcript video.srt (or .vtt / .txt / .md / .json).")
+            print("   Example: python main.py -i video.mp4 --transcript video.srt")
+            exit(1)
 
         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
         if transcript is not None:
@@ -1797,7 +1808,12 @@ if __name__ == '__main__':
                         *audio_encode_args(),
                         clip_temp_path
                     ]
-                    subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    cut_res = subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    if cut_res.returncode != 0:
+                        err = cut_res.stderr.decode('utf-8', errors='replace')[-400:].strip()
+                        raise RuntimeError(f"ffmpeg cut failed (code {cut_res.returncode}): {err}")
+                    if not os.path.exists(clip_temp_path) or os.path.getsize(clip_temp_path) == 0:
+                        raise RuntimeError(f"ffmpeg cut produced empty file: {clip_temp_path}")
 
                     success = render_clip(clip_temp_path, clip_final_path, output_format)
                     # Layer order: watermark burns into the canonical (so any

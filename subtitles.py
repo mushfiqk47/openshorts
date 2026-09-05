@@ -8,52 +8,8 @@ from ffmpeg_utils import video_encode_args, QUALITY, METADATA_SCRUB
 
 _STDIO_CONFIGURED = False
 
-# Shared faster-whisper config so both transcription paths (this module and
-# main.transcribe_video) behave identically. "small" is meaningfully better at
-# German than "base" without being much slower on CPU.
-DEFAULT_WHISPER_MODEL = "small"
-
-
-def _auto_whisper_device():
-    """GPU-first whisper device: cuda when a GPU is present, else cpu.
-
-    Env var WHISPER_DEVICE pins the choice; when unset we probe torch once.
-    WHISPER_DEVICE=auto also probes. This makes self-host installs that do
-    have a GPU automatically transcribe on it without editing .env.
-    """
-    explicit = os.environ.get("WHISPER_DEVICE", "").strip().lower()
-    if explicit and explicit != "auto":
-        return explicit
-    # auto-detect
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return "cuda"
-    except Exception:
-        pass
-    return "cpu"
-
-
-def get_whisper_config():
-    """Return the faster-whisper model config, overridable via env vars."""
-    device = _auto_whisper_device()
-    # compute_type default follows the device when not pinned
-    default_compute = "float16" if device == "cuda" else "int8"
-    return {
-        "model_size": os.environ.get("WHISPER_MODEL", DEFAULT_WHISPER_MODEL),
-        "device": device,
-        "compute_type": os.environ.get("WHISPER_COMPUTE", default_compute),
-    }
-
-
-# Decode params shared by both transcription paths. condition_on_previous_text
-# is off to avoid repetition/hallucination loops; vad_filter drops silence.
-WHISPER_TRANSCRIBE_PARAMS = {
-    "beam_size": 5,
-    "vad_filter": True,
-    "condition_on_previous_text": False,
-    "word_timestamps": True,
-}
+# Transcripts arrive via --transcript files (see transcript_input.py) already in
+# the contract shape below; auto-transcription was removed.
 
 
 def merge_continuation_words(words):
@@ -132,17 +88,14 @@ def _normalize_subtitle_word(value):
 
 
 def transcribe_audio(video_path):
-    """
-    Transcribe audio from a video file via the configured ASR backend.
-    Returns transcript in the same format as main.py for compatibility.
-    """
-    # Lazy import: transcribe_backends imports helpers from this module.
-    from transcribe_backends import transcribe_media
+    """Retired: Whisper auto-transcription was removed.
 
-    _log(f"🎙️  Transcribing audio from: {video_path}")
-    transcript = transcribe_media(video_path)
-    _log(f"✅ Transcription complete. Language: {transcript['language']}")
-    return transcript
+    Subtitles now come from the user-supplied --transcript file. Dubbed-video
+    re-transcription is no longer available; re-supply a transcript instead.
+    """
+    raise RuntimeError(
+        "Auto-transcription was removed. Supply --transcript video.srt "
+        "(or .vtt / .txt / .md / .json) instead.")
 
 
 def generate_srt_from_video(video_path, output_path, max_chars=20, max_duration=2.0,
@@ -254,15 +207,17 @@ SAFE_MARGIN_V = 43
 # so the active word reads instantly on any background; the base text stays
 # fully opaque (dimming it tested worse over bright scenes). This is a starting
 # point, not a cage — the subtitle modal still overrides every field.
+AUTO_CAPTION_FONT_SIZE = int(os.environ.get("CAPTION_FONT_SIZE", "13"))
+
 AUTO_CAPTION_STYLE = {
     "style": "karaoke",
     "alignment": "bottom",
     "font_name": "Anton",
-    "font_size": 44,
+    "font_size": AUTO_CAPTION_FONT_SIZE,
     "font_color": "#FFFFFF",
     "highlight_color": "#FFE500",
     "border_color": "#000000",
-    "border_width": 4,
+    "border_width": 3,
     "effect": "pop",
     "base_opacity": 1.0,
     "uppercase": True,
@@ -320,7 +275,7 @@ def _dim_hex_color(hex_color, opacity, fallback="FFFFFF"):
 
 def generate_ass(transcript, clip_start, clip_end, output_path,
                  max_chars=20, max_duration=2.0, alignment='bottom',
-                 fontsize=16, font_name="Verdana", font_color="#FFFFFF",
+                 fontsize=13, font_name="Verdana", font_color="#FFFFFF",
                  border_color="#000000", border_width=2,
                  highlight_color="#FFD700", bg_color="#000000", bg_opacity=0.0,
                  effect="none", base_opacity=1.0, uppercase=False,
@@ -341,9 +296,9 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
         return False
 
     # Match the SRT burn path: PlayResY 288 keeps font sizes consistent.
-    final_fontsize = int(_clamp_number(fontsize, 10, 200, 16) * 0.85)
-    if final_fontsize < 10:
-        final_fontsize = 10
+    final_fontsize = int(_clamp_number(fontsize, 6, 200, 13) * 0.85)
+    if final_fontsize < 6:
+        final_fontsize = 6
 
     align_map = {'top': 8, 'middle': 5, 'bottom': 2}
     ass_alignment = align_map.get(str(alignment).lower(), 2)
@@ -485,7 +440,7 @@ def _sanitize_font_name(name):
     return cleaned or "Verdana"
 
 
-def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
+def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=13,
                    font_name="Verdana", font_color="#FFFFFF",
                    border_color="#000000", border_width=2,
                    bg_color="#000000", bg_opacity=0.0):
@@ -507,9 +462,9 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
 
     # Font size scaling for ASS virtual resolution (PlayResY=288 default)
     # For vertical 1080x1920 video, we need larger text for readability
-    final_fontsize = int(_clamp_number(fontsize, 10, 200, 16) * 0.85)
-    if final_fontsize < 10:
-        final_fontsize = 10
+    final_fontsize = int(_clamp_number(fontsize, 6, 200, 13) * 0.85)
+    if final_fontsize < 6:
+        final_fontsize = 6
 
     safe_font_name = _sanitize_font_name(font_name)
     bg_opacity = _clamp_number(bg_opacity, 0.0, 1.0, 0.0)

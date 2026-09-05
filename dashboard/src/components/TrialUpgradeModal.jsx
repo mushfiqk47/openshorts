@@ -42,7 +42,7 @@ export default function TrialUpgradeModal({ plan, onActivated, onClose }) {
         await onActivated();
         setError('Almost there — your plan is activating. If it doesn\'t unlock in a minute, check your billing details.');
       }
-    } catch (e) {
+    } catch {
       setError('Could not activate your plan. Please try again or manage billing from your account.');
     } finally {
       setBusy(false);
