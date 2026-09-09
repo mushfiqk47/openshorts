@@ -10,17 +10,27 @@ export interface CaptionBlock {
 /**
  * Groups word-level captions into display blocks.
  * Same logic as OpenShorts' generate_srt: max chars per block, max duration per block.
+ * offsetMs shifts every word first (the manual sync nudge), clamping at 0 and
+ * dropping words that end at or before 0 — mirrors _collect_word_blocks.
  */
 export function groupCaptionsIntoBlocks(
   captions: CaptionWord[],
   maxChars = 20,
-  maxDurationMs = 2000
+  maxDurationMs = 2000,
+  offsetMs = 0
 ): CaptionBlock[] {
+  const shifted: CaptionWord[] = [];
+  for (const w of captions) {
+    const startMs = w.startMs + offsetMs;
+    const endMs = w.endMs + offsetMs;
+    if (endMs <= 0 || endMs <= Math.max(0, startMs)) continue;
+    shifted.push({ ...w, startMs: Math.max(0, startMs), endMs });
+  }
   const blocks: CaptionBlock[] = [];
   let currentWords: CaptionWord[] = [];
   let blockStartMs = 0;
 
-  for (const word of captions) {
+  for (const word of shifted) {
     if (currentWords.length === 0) {
       currentWords.push(word);
       blockStartMs = word.startMs;

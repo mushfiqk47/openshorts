@@ -18,12 +18,19 @@ interface SubtitlesProps {
 const POSITION_MAP: Record<string, React.CSSProperties> = {
   top: { top: "12%", bottom: "auto" },
   middle: { top: "45%", bottom: "auto" },
-  bottom: { bottom: "10%", top: "auto" },
+  // 15% matches the burn's SAFE_MARGIN_V (43/288 of frame height) so the
+  // preview sits where TikTok/Reels-safe captions actually land.
+  bottom: { bottom: "15%", top: "auto" },
 };
 
 export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
   const { fps } = useVideoConfig();
-  const blocks = groupCaptionsIntoBlocks(config.captions);
+  const blocks = groupCaptionsIntoBlocks(
+    config.captions,
+    20,
+    2000,
+    config.timeOffsetMs ?? 0
+  );
 
   return (
     <AbsoluteFill>
@@ -201,6 +208,21 @@ const WordSpan: React.FC<WordSpanProps> = ({
         };
         break;
       }
+      case "box": {
+        // Mirrors the burn's box effect: white text inside a thick
+        // highlight-colored outline (server draws \bord+3 in highlight).
+        color = "#FFFFFF";
+        const boxW = style.borderWidth + 3;
+        extraStyle = {
+          textShadow: [
+            `${boxW}px 0 0 ${style.highlightColor}`,
+            `-${boxW}px 0 0 ${style.highlightColor}`,
+            `0 ${boxW}px 0 ${style.highlightColor}`,
+            `0 -${boxW}px 0 ${style.highlightColor}`,
+          ].join(", "),
+        };
+        break;
+      }
       default:
         break;
     }
@@ -217,6 +239,8 @@ const WordSpan: React.FC<WordSpanProps> = ({
         ].join(", ")
       : "none";
 
+  // Box replaces the dark stroke with its own highlight outline (like the burn).
+  const boxActive = animation === "box" && isActive;
   return (
     <span
       style={{
@@ -226,7 +250,7 @@ const WordSpan: React.FC<WordSpanProps> = ({
         color: animation === "karaoke" && isActive ? undefined : color,
         textShadow:
           animation !== "karaoke"
-            ? [strokeShadow, extraStyle.textShadow].filter(Boolean).join(", ")
+            ? [boxActive ? null : strokeShadow, extraStyle.textShadow].filter(Boolean).join(", ")
             : strokeShadow,
         transform,
         display: "inline-block",

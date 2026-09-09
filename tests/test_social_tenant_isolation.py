@@ -22,6 +22,7 @@ import pytest
 from fastapi import HTTPException
 
 import app as app_module
+from routers import social as social_router
 
 
 OTHER_TENANT = "os_deadbeefcafe"
@@ -81,8 +82,8 @@ class TestScheduledPostsAreFilteredByProfile:
         async def fake_get(api_key, url, params):
             return vendor_rows
 
-        monkeypatch.setattr(app_module, "_upload_post_get", fake_get)
-        rows = asyncio.run(app_module._scheduled_posts_for("key", "os_mine"))
+        monkeypatch.setattr(social_router, "_upload_post_get", fake_get)
+        rows = asyncio.run(social_router._scheduled_posts_for("key", "os_mine"))
 
         assert [r["job_id"] for r in rows] == ["mine-1", "mine-2"]
         assert all(r.get("profile_username") == "os_mine" for r in rows)

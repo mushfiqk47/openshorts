@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenShorts is an AI-powered vertical video generator that transforms long YouTube videos or local uploads into viral-ready short clips (9:16 format) for TikTok, Instagram Reels, and YouTube Shorts. Uses Google Gemini 2.0 Flash for viral moment detection and title generation.
+OpenShorts is an AI-powered vertical video generator that transforms long YouTube videos or local uploads into viral-ready short clips (9:16 format) for TikTok, Instagram Reels, and YouTube Shorts. Uses Gemini (default gemini-2.5-flash) for viral moment detection and title generation. Sources arrive with a user-supplied transcript file (.srt/.vtt/.txt/.md/.json, required at submit) — auto-transcription was removed.
 
 ## Development Commands
 
@@ -34,7 +34,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 ### Core Processing Pipeline
 1. **Ingest** - YouTube download (yt-dlp) or local upload
-2. **Transcription** - faster-whisper with word-level timestamps
+2. **Transcript** - user-supplied file with word-level timestamps (required at submit)
 3. **Scene Detection** - PySceneDetect for segment boundaries
 4. **AI Analysis** - Gemini identifies 3-15 viral moments (15-60 sec each)
 5. **FFmpeg Extraction** - Precise clip cutting
@@ -48,14 +48,17 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 ### Key Files
 | File | Purpose |
 |------|---------|
-| `main.py` | Core video processing: transcription, scene detection, clip extraction, vertical reframing |
-| `app.py` | FastAPI server with async job queue and REST endpoints |
+| `main.py` | Clip pipeline composition root: download, scenes, Gemini/LLM stages, render |
+| `app.py` | FastAPI composition root + job-core routes (routers hold the split clusters) |
+| `config.py` / `state.py` | Import-time env constants + layout allow-list / shared job store singletons |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
+| `routers/` | Split route clusters: `system` (health/config/env/models), `gallery` (SEO pages), `social` (post/profiles/analytics/schedule) |
+| `pipeline/tracking.py` | SmoothedCameraman + SpeakerTracker (numpy-only, no ML stack) |
 | `hooks.py` | Hook text overlay generation with font rendering |
 | `s3_uploader.py` | AWS S3 upload with caching |
 | `subtitles.py` | SRT generation, FFmpeg subtitle burning, and dubbed video transcription |
 | `translate.py` | ElevenLabs dubbing API for AI voice translation |
-| `dashboard/src/App.jsx` | Main React component with state management |
+| `dashboard/src/App.jsx` | Composing screen (job submit/poll/results); key state in `hooks/useApiKeys.js`, crypto in `lib/crypto.js` |
 | `dashboard/src/components/TranslateModal.jsx` | Voice dubbing UI with language selection |
 | `dashboard/vite-plugin-seo.js` | Build-time SEO surface: injects crawler-visible homepage content, emits static pages, sitemap.xml and llms.txt |
 | `dashboard/seo/data.js` | Single source of truth for pricing, pipeline and competitor facts used by every generated page |
@@ -217,7 +220,7 @@ Async job queue with semaphore-based concurrency control. Configure via `MAX_CON
 > API keys are stored encrypted in the browser and sent via headers only when needed. Never stored server-side.
 
 ## Tech Stack
-- **Backend:** Python 3.11, FastAPI, google-genai, faster-whisper, ultralytics (YOLOv8), mediapipe, opencv-python, yt-dlp, FFmpeg, httpx
+- **Backend:** Python 3.11, FastAPI, google-genai, ultralytics (YOLOv8), mediapipe, opencv-python, yt-dlp, FFmpeg, httpx
 - **Frontend:** React 18, Vite 4, Tailwind CSS 3.4
 - **External APIs:** Google Gemini, ElevenLabs Dubbing, Upload-Post
 - **Infrastructure:** Docker + Docker Compose, AWS S3

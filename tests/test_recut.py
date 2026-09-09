@@ -245,7 +245,7 @@ class TestPerformRecut:
     def test_captions_burn_last_and_win_the_served_name(self, tmp_path):
         captioned = []
 
-        def fake_captioner(path, transcript, start, end):
+        def fake_captioner(path, transcript, start, end, style_override=None):
             captioned.append((os.path.basename(path), start, end))
             out = os.path.join(os.path.dirname(path),
                                f"subtitled_1_{os.path.basename(path)}")

@@ -1,63 +1,29 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, PanelLeft, PanelLeftClose, Menu } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
-import ScheduleWeekModal from './components/ScheduleWeekModal';
-import ClipEditor from './components/ClipEditor';
-import ReframeEditor from './components/ReframeEditor';
+// Heavy editors/modals are route-level code splits: they load on first open,
+// not on boot. ResultCard stays eager (it IS the results view); everything
+// behind a click becomes a lazy chunk. See OPTIMIZATION_PLAN.md T2.
+const ScheduleWeekModal = lazy(() => import('./components/ScheduleWeekModal'));
+const ClipEditor = lazy(() => import('./components/ClipEditor'));
+const ReframeEditor = lazy(() => import('./components/ReframeEditor'));
+const TopUpModal = lazy(() => import('./components/TopUpModal'));
+const PlanChoiceModal = lazy(() => import('./components/PlanChoiceModal'));
+const TrialUpgradeModal = lazy(() => import('./components/TrialUpgradeModal'));
+const LoginModal = lazy(() => import('./components/LoginModal'));
 import UsageMeter from './components/UsageMeter';
-import TopUpModal from './components/TopUpModal';
 import StarBanner from './components/StarBanner';
-import PlanChoiceModal from './components/PlanChoiceModal';
-import TrialUpgradeModal from './components/TrialUpgradeModal';
-import LoginModal from './components/LoginModal';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
 import EnvSettings from './components/EnvSettings';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
+import { encrypt } from './lib/crypto';
+import { useApiKeys } from './hooks/useApiKeys';
 import { track } from './lib/analytics';
-
-// Enhanced "Encryption" using XOR + Base64 with a Salt
-// This is better than plain Base64 but still client-side.
-const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || "OpenShorts-Static-Salt-Change-Me";
-const ENCRYPTION_PREFIX = "ENC:";
-
-const encrypt = (text) => {
-  if (!text) return '';
-  try {
-    const xor = text.split('').map((c, i) =>
-      String.fromCharCode(c.charCodeAt(0) ^ SECRET_KEY.charCodeAt(i % SECRET_KEY.length))
-    ).join('');
-    return ENCRYPTION_PREFIX + btoa(xor);
-  } catch (e) {
-    console.error("Encryption failed", e);
-    return text;
-  }
-};
-
-const decrypt = (text) => {
-  if (!text) return '';
-  if (text.startsWith(ENCRYPTION_PREFIX)) {
-    try {
-      const raw = text.slice(ENCRYPTION_PREFIX.length);
-      // Check if it's plain base64 or our custom XOR (simple try)
-      const xor = atob(raw);
-      const result = xor.split('').map((c, i) =>
-        String.fromCharCode(c.charCodeAt(0) ^ SECRET_KEY.charCodeAt(i % SECRET_KEY.length))
-      ).join('');
-      return result;
-    } catch {
-      // Fallback if decryption fails (might be old plain text)
-      return '';
-    }
-  }
-  // Backward compatibility: If no prefix, assume old plain text (or return empty if you want to force re-login)
-  // For migration: Return text as is, so it populates the field, and next save will encrypt it.
-  return text;
-};
 
 // Simple TikTok icon sine Lucide might not have it or it varies
 const TikTokIcon = ({ size = 16, className = "" }) => (
@@ -201,28 +167,7 @@ function App() {
   // the ephemeral local /videos/ files have been cleaned up (e.g. after a reload).
   const [durableClips, setDurableClips] = useState({});
 
-  const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
-  // Social API State - Load encrypted or plain
-  const [uploadPostKey, setUploadPostKey] = useState(() => {
-    const stored = localStorage.getItem('uploadPostKey_v3');
-    if (stored) return decrypt(stored);
-    return '';
-  });
-  // ElevenLabs API State - Load encrypted
-  const [elevenLabsKey, setElevenLabsKey] = useState(() => {
-    const stored = localStorage.getItem('elevenLabsKey_v1');
-    if (stored) return decrypt(stored);
-    return '';
-  });
-
-  // fal.ai API State - Load encrypted
-  const [falKey, setFalKey] = useState(() => {
-    const stored = localStorage.getItem('falKey_v1');
-    if (stored) return decrypt(stored);
-    return '';
-  });
-
-  const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
+  const { apiKey, setApiKey, uploadPostKey, setUploadPostKey, elevenLabsKey, setElevenLabsKey, falKey, setFalKey, uploadUserId, setUploadUserId } = useApiKeys();
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
   // Post-generation social nudge: shown at the results peak until the user
   // either connects a network or dismisses it. Only 2.7% of cloud users who
@@ -499,33 +444,6 @@ function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId, status, results, activeTab, noSource, projectState]);
-
-  useEffect(() => {
-    // Encrypt Gemini Key too for consistency if desired, but user asked specifically about Social integration not saving well.
-    // For now keeping gemini plain for compatibility unless requested.
-    if (apiKey) localStorage.setItem('gemini_key', apiKey);
-  }, [apiKey]);
-
-  useEffect(() => {
-    if (uploadPostKey) {
-      localStorage.setItem('uploadPostKey_v3', encrypt(uploadPostKey));
-    }
-    if (uploadUserId) {
-      localStorage.setItem('uploadUserId', uploadUserId);
-    }
-  }, [uploadPostKey, uploadUserId]);
-
-  useEffect(() => {
-    if (elevenLabsKey) {
-      localStorage.setItem('elevenLabsKey_v1', encrypt(elevenLabsKey));
-    }
-  }, [elevenLabsKey]);
-
-  useEffect(() => {
-    if (falKey) {
-      localStorage.setItem('falKey_v1', encrypt(falKey));
-    }
-  }, [falKey]);
 
   useEffect(() => {
     if ((uploadPostKey || isManaged) && userProfiles.length === 0) {
@@ -1653,6 +1571,7 @@ function App() {
         </div>
       </Modal>
 
+      <Suspense fallback={null}>
       <ScheduleWeekModal
         isOpen={showScheduleWeek}
         onClose={() => setShowScheduleWeek(false)}
@@ -1662,6 +1581,7 @@ function App() {
         uploadUserId={uploadUserId}
         isManaged={isManaged}
       />
+      </Suspense>
 
       {/* Pre-flight quality gate */}
       {qualityGate && (
@@ -1691,6 +1611,7 @@ function App() {
 
 
       {editingClip !== null && results?.clips?.[editingClip] && (
+        <Suspense fallback={null}>
         <ClipEditor
           jobId={jobId}
           clipIndex={editingClip}
@@ -1698,8 +1619,10 @@ function App() {
           onClose={() => setEditingClip(null)}
           onRerendered={handleClipRerendered}
         />
+        </Suspense>
       )}
       {reframingClip !== null && results?.clips?.[reframingClip] && (
+        <Suspense fallback={null}>
         <ReframeEditor
           jobId={jobId}
           clipIndex={reframingClip}
@@ -1707,7 +1630,9 @@ function App() {
           onClose={() => setReframingClip(null)}
           onReframed={handleClipRerendered}
         />
+        </Suspense>
       )}
+      <Suspense fallback={null}>
       {showLogin && <LoginModal onClose={() => setShowLogin(false)} />}
       {showPlanChoice && <PlanChoiceModal onClose={() => setShowPlanChoice(false)} />}
       {showTopUp && (
@@ -1725,6 +1650,7 @@ function App() {
           onClose={() => setShowTrialUpgrade(false)}
         />
       )}
+      </Suspense>
     </div>
   );
 }

@@ -1,13 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense, memo } from 'react';
 import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
-import SubtitleModal from './SubtitleModal';
-import HookModal from './HookModal';
-import TranslateModal from './TranslateModal';
+// Per-card modals open on click only: split them so the results grid (N cards
+// x 4 modals) does not multiply the initial bundle. Each Suspense resolves on
+// first open; the isOpen prop keeps the closed modal unmounted until then.
+const SubtitleModal = lazy(() => import('./SubtitleModal'));
+const HookModal = lazy(() => import('./HookModal'));
+const TranslateModal = lazy(() => import('./TranslateModal'));
+const WatermarkModal = lazy(() => import('./WatermarkModal'));
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
-import WatermarkModal from './WatermarkModal';
 import { watermarkNoticeDismissed } from '../lib/watermark';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
@@ -36,7 +39,7 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
+export default memo(function ResultCard({ clip, index, jobId, durableUrl, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
     const [showModal, setShowModal] = useState(false);
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
@@ -1016,6 +1019,7 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                 </div>
             </Modal>
 
+            <Suspense fallback={null}>
             <SubtitleModal
                 isOpen={showSubtitleModal}
                 onClose={() => setShowSubtitleModal(false)}
@@ -1058,14 +1062,17 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
                 videoUrl={currentVideoUrl}
                 hasApiKey={!!elevenLabsKey}
             />
+            </Suspense>
 
             {showWatermarkModal && (
+                <Suspense fallback={null}>
                 <WatermarkModal
                     onClose={() => setShowWatermarkModal(false)}
                     onContinue={downloadClip}
                 />
+                </Suspense>
             )}
 
         </div>
     );
-}
+})

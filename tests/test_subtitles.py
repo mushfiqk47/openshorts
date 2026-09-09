@@ -1,6 +1,7 @@
 """Tests for subtitle word merging, SRT generation and style sanitizing."""
 from subtitles import (
     merge_continuation_words,
+    generate_ass,
     generate_srt,
     hex_to_ass_color,
     _sanitize_font_name,
@@ -330,3 +331,44 @@ class TestFilterQuoting:
     def test_plain_path_untouched(self):
         from subtitles import _escape_ffmpeg_filter_value
         assert _escape_ffmpeg_filter_value("/out/subs_0_123.ass") == "/out/subs_0_123.ass"
+
+
+class TestTimeOffset:
+    def _transcript(self, words):
+        return {"segments": [{"start": 0, "end": 99, "text": "", "words": words}]}
+
+    def test_positive_offset_shifts_events_later(self, tmp_path):
+        out = tmp_path / "subs.srt"
+        words = [_w(" hello", 1.0, 1.5), _w(" world", 1.5, 2.0)]
+        assert generate_srt(self._transcript(words), 0, 10, str(out),
+                            time_offset=0.5) is True
+        srt = out.read_text(encoding="utf-8-sig")
+        assert "00:00:01,500 --> 00:00:02,500" in srt
+
+    def test_negative_offset_shifts_earlier_and_clamps_at_zero(self, tmp_path):
+        out = tmp_path / "subs.srt"
+        words = [_w(" hello", 0.5, 1.0)]
+        assert generate_srt(self._transcript(words), 0, 10, str(out),
+                            time_offset=-0.3) is True
+        srt = out.read_text(encoding="utf-8-sig")
+        assert "00:00:00,200 --> 00:00:00,700" in srt
+
+    def test_word_collapsed_to_zero_length_is_dropped(self, tmp_path):
+        out = tmp_path / "subs.srt"
+        words = [_w(" hello", 0.2, 0.5)]
+        assert generate_srt(self._transcript(words), 0, 10, str(out),
+                            time_offset=-0.5) is False
+
+    def test_fully_shifted_out_words_return_false(self, tmp_path):
+        out = tmp_path / "subs.srt"
+        words = [_w(" hello", 0.2, 0.5)]
+        assert generate_srt(self._transcript(words), 0, 10, str(out),
+                            time_offset=-5.0) is False
+
+    def test_ass_path_forwards_offset(self, tmp_path):
+        out = tmp_path / "subs.ass"
+        words = [_w(" hello", 1.0, 1.5)]
+        assert generate_ass(self._transcript(words), 0, 10, str(out),
+                            time_offset=1.0) is True
+        ass = out.read_text(encoding="utf-8-sig")
+        assert "Dialogue: 0,0:00:02.00," in ass

@@ -35,6 +35,7 @@ const ANIMATION_OPTIONS = [
     { value: 'pop', label: 'Pop' },
     { value: 'word-highlight', label: 'Glow' },
     { value: 'karaoke', label: 'Karaoke' },
+    { value: 'box', label: 'Box' },
     { value: 'none', label: 'None' },
 ];
 
@@ -96,6 +97,9 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     const [baseOpacity, setBaseOpacity] = useState(1.0);
     const [uppercase, setUppercase] = useState(false);
     const [activePreset, setActivePreset] = useState(null);
+    // Manual sync nudge in seconds (positive = captions later). For transcripts
+    // whose word times drift from the audio; applied to burn AND preview.
+    const [timeOffset, setTimeOffset] = useState(0);
 
     // Synchronize style from clip's existing subtitle settings if present
     useEffect(() => {
@@ -118,6 +122,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
             if (existingSubtitle.effect) setEffect(existingSubtitle.effect);
             if (existingSubtitle.base_opacity !== undefined) setBaseOpacity(existingSubtitle.base_opacity);
             if (existingSubtitle.uppercase !== undefined) setUppercase(existingSubtitle.uppercase);
+            if (existingSubtitle.time_offset !== undefined) setTimeOffset(existingSubtitle.time_offset);
         }
     }, [isOpen, existingSubtitle]);
 
@@ -133,7 +138,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
         setFontColor('#FFFFFF');
         setBgOpacity(0);
         // Keep the Remotion preview roughly in sync with the burned look
-        setAnimation(p.style === 'karaoke' ? (p.effect === 'pop' ? 'pop' : p.effect === 'glow' ? 'word-highlight' : 'karaoke') : 'none');
+        setAnimation(p.style === 'karaoke' ? (p.effect === 'pop' ? 'pop' : p.effect === 'glow' ? 'word-highlight' : p.effect === 'box' ? 'box' : 'karaoke') : 'none');
     };
 
     // Remotion preview state
@@ -194,6 +199,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     const subtitleConfig = {
         captions,
         position,
+        timeOffsetMs: Math.round(timeOffset * 1000),
         style: {
             fontFamily: fontName,
             fontSize: Math.round(fontSize * 5.67), // Match 1080p ASS render scale
@@ -358,6 +364,22 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                             </div>
                         </div>
 
+                        {/* Sync offset: nudge captions against drifted word times */}
+                        <div>
+                            <div className="flex justify-between items-center mb-2">
+                                <p className="eyebrow">Sync offset</p>
+                                <span className="readout">{timeOffset > 0 ? '+' : ''}{timeOffset.toFixed(1)}s</span>
+                            </div>
+                            <input
+                                type="range"
+                                min="-10"
+                                max="10"
+                                value={Math.round(timeOffset * 10)}
+                                onChange={(e) => setTimeOffset(parseInt(e.target.value, 10) / 10)}
+                                className="w-full accent-[var(--color-accent)]"
+                            />
+                        </div>
+
                         {/* Animation Style (new) */}
                         <div>
                             <p className="eyebrow mb-2">Animation</p>
@@ -515,6 +537,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                 position, fontSize, fontName, fontColor, borderColor, borderWidth, bgColor, bgOpacity,
                                 // Karaoke burn (server-side ASS render)
                                 style, effect, baseOpacity, uppercase, highlightColor,
+                                time_offset: timeOffset,
                                 // Remotion data
                                 remotion: useRemotionPreview ? subtitleConfig : null,
                                 captions: textEdited ? captions : null,

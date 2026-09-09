@@ -5,7 +5,6 @@ Everything here is read lazily from environment variables so that importing the
 ``BILLING_ENABLED`` is truthy (see ``cloud.is_enabled``).
 """
 import os
-from functools import lru_cache
 
 
 def _flag(name: str, default: str = "") -> bool:
@@ -78,25 +77,23 @@ THUMBNAIL_MINUTES = 3
 # burn the operator's managed Gemini budget. Pure-text calls (titles/desc) stay free.
 MANAGED_ANALYSIS_MINUTES = 1
 
-# Post-processing FFmpeg re-encodes (subtitle burn, hook overlay) and the
-# Remotion render proxy do real server compute per call. Meter a small fixed
-# cost so an entitled user can't loop them for free off-quota.
-SUBTITLE_MINUTES = 2
+# Caption burns are free (see subtitle_minutes_for below); hook overlays and
+# the Remotion render proxy keep their own metering.
 
 
 def subtitle_minutes_for(filename: str) -> int:
     """Minutes charged for burning captions onto ``filename``.
 
-    Zero for the normal path: the SRT comes from the transcript already stored
-    in metadata.json and the burn is one short FFmpeg pass, so there is nothing
-    to recover. Captions are also table stakes for short-form — charging 2 min
-    (10% of the free monthly quota) per clip priced them out of the product and
-    only 9% of delivered clips ever had them (prod audit, 25-jul-2026).
-
-    Dubbed clips are the exception: subtitling them re-runs Whisper over the
-    translated audio, which is real compute, so they keep the charge.
+    Always zero now. The SRT comes from the transcript already stored in
+    metadata.json and the burn is one short FFmpeg pass, so there is nothing
+    to recover — and charging priced captions out of the product (only 9% of
+    delivered clips had them in the 25-jul-2026 prod audit). The old dubbed
+    exception (a fresh Whisper pass over translated audio) died with
+    auto-transcription: dubbed clips use the stored transcript like the rest.
+    Kept as a function (rather than inlining 0) so the call site keeps one
+    metering seam if captioning ever costs real compute again.
     """
-    return SUBTITLE_MINUTES if str(filename).startswith("translated_") else 0
+    return 0
 HOOK_MINUTES = 1
 RENDER_MINUTES = 3
 

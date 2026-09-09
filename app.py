@@ -19,76 +19,37 @@ import glob
 import time
 import zipfile
 import math
-import itertools
 import asyncio
-from datetime import datetime, timezone, timedelta
+import httpx
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
-from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
+from s3_uploader import upload_job_artifacts
 import recut
 
 load_dotenv()
 
-# Constants
-UPLOAD_DIR = "uploads"
-OUTPUT_DIR = "output"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Configuration
-# Default to 1 if not set, but user can set higher for powerful servers
-MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
-MAX_FILE_SIZE_MB = 2048  # 2GB limit
-
-# How TikTok receives our uploads. MEDIA_UPLOAD lands the video in the user's
-# TikTok drafts so they finish the post inside TikTok's own editor; DIRECT_POST
-# publishes straight to their feed, which is Upload-Post's default.
-#
-# Drafts are the safer default for an automated pipeline: nothing reaches an
-# audience without the account owner seeing it first, and TikTok's own editor is
-# where covers, sounds and hashtags actually get chosen. The UI must say so —
-# a user who expects a published post and finds a draft will read it as a bug.
-TIKTOK_POST_MODE = os.environ.get("TIKTOK_POST_MODE", "MEDIA_UPLOAD").strip()
-# Ceiling for the working directory once it lives on a persistent volume: the
-# age-based sweep alone can't stop a burst of long videos from filling the disk.
-# 0 disables the cap.
-OUTPUT_MAX_GB = int(os.environ.get("OUTPUT_MAX_GB", "25"))
-# Same idea for source uploads, which are the biggest single files on disk.
-UPLOADS_MAX_GB = int(os.environ.get("UPLOADS_MAX_GB", "15"))
-# Pre-flight quality gate: warn before processing a YouTube source below this
-# height (0 disables). Only applies to URLs; uploads are whatever the user gave.
-QUALITY_GATE_MIN_HEIGHT = int(os.environ.get("QUALITY_GATE_MIN_HEIGHT", "720"))
-# Reject sources shorter than this before starting (0 disables). A 24s YouTube
-# Short cannot yield 15-60s clips: Gemini returns nothing, the job burns
-# managed minutes and dies with "no usable clips" (prod 20-ago: 3 of 5 recent
-# failures were exactly this, one user retrying the same 24s video).
-MIN_SOURCE_SECONDS = int(os.environ.get("MIN_SOURCE_SECONDS", "45"))
-QUALITY_PROBE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quality_probe.py")
-DISABLE_YOUTUBE_URL = os.environ.get("DISABLE_YOUTUBE_URL", "false").lower() in ("1", "true", "yes")
+# Process-wide env constants live in config.py; job store in state.py.
+# Re-exported here so `app_module.<name>` keeps working for callers/tests.
+from config import (
+    BILLING_ENABLED, DEBUG_LOGS, DISABLE_YOUTUBE_URL, JOB_RETENTION_SECONDS,
+    MAX_CONCURRENT_JOBS, MAX_FILE_SIZE_MB,
+    MIN_SOURCE_SECONDS, OUTPUT_DIR, OUTPUT_MAX_GB, QUALITY_GATE_MIN_HEIGHT,
+    QUALITY_PROBE_SCRIPT, UPLOAD_DIR, UPLOADS_MAX_GB,
+    layout_env,
+)
 
 # ---- Cloud billing (paid / managed-keys) integration --------------------------
 # All paid-mode code lives in the optional `cloud/` package and is imported ONLY
-# when BILLING_ENABLED is set. With the flag off, the app behaves exactly as the
-# self-hosted BYOK app does today (no extra dependencies required).
-BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "").lower() in ("1", "true", "yes")
-
-# Job/file retention (issue #46). Self-host defaults to 24h: the 1h sweep kept
-# deleting finished projects under users who never touched their env, and the
-# OUTPUT_MAX_GB / UPLOADS_MAX_GB caps below already bound the disk. Cloud keeps
-# the tight default because clips are archived to R2 as soon as a job finishes.
-JOB_RETENTION_SECONDS = int(
-    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "86400")
-)
-# Force full pipeline logs to the client even under billing (local debugging).
-DEBUG_LOGS = os.environ.get("DEBUG_LOGS", "").lower() in ("1", "true", "yes")
-
+# when BILLING_ENABLED is set (imported from config above). With the flag off,
+# the app behaves exactly as the self-hosted BYOK app does today.
 if BILLING_ENABLED:
     import cloud
     from cloud import managed_keys, metering as _metering, config as _cloud_config, alerts as _alerts
@@ -383,21 +344,8 @@ async def _assert_job_owner(request, record):
     if user is None or str(user.id) != str(owner):
         raise HTTPException(status_code=404, detail="Not found")
 
-# Application State
-# PriorityQueue holds (priority, seq, job_id). Lower priority dispatches first:
-# pro=0, starter/creator=1, BYOK/anonymous/self-host=2. The seq counter keeps
-# FIFO order within a priority and makes the tuples always comparable. With
-# BILLING disabled every job enqueues at priority 2 → plain FIFO as before.
-job_queue = asyncio.PriorityQueue()
-_job_seq = itertools.count()
-jobs: Dict[str, Dict] = {}
-publish_jobs: Dict[str, Dict] = {}  # {publish_id: {status, result, error}}
-# Semester to limit concurrency to MAX_CONCURRENT_JOBS
-concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
-
-
-def _enqueue_job(job_id: str, priority: int = 2):
-    job_queue.put_nowait((priority, next(_job_seq), job_id))
+# Application State lives in state.py (single shared seam for jobs/queue).
+from state import _enqueue_job, concurrency_semaphore, job_queue, jobs
 
 def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     """
@@ -1237,6 +1185,15 @@ if BILLING_ENABLED:
 import mcp_server as _mcp_server
 app.include_router(_mcp_server.router)
 
+# Local route clusters (each module exposes only `router`). Registration order
+# is safe: none of these paths collide with the job-core routes below.
+from routers import gallery as _gallery_routes
+from routers import social as _social_routes
+from routers import system as _system_routes
+app.include_router(_system_routes.router)
+app.include_router(_gallery_routes.router)
+app.include_router(_social_routes.router)
+
 # Enable CORS for frontend. Cloud mode locks this down to the configured origins;
 # self-host keeps the permissive wildcard it has always used.
 app.add_middleware(
@@ -1443,99 +1400,7 @@ async def run_job(job_id, job_data):
         # inside a yt-dlp/httpx error) — scrub before it reaches client logs.
         jobs[job_id]['logs'].append(_scrub_secrets(f"Execution error: {str(e)}"))
 
-@app.get("/health")
-async def health():
-    """Lightweight liveness probe for uptime monitoring / Coolify health checks."""
-    return {"status": "ok"}
-
-@app.get("/api/config")
-async def get_config():
-    return {
-        "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
-        "billingEnabled": BILLING_ENABLED,
-        "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
-        "jobRetentionSeconds": JOB_RETENTION_SECONDS,
-        "llmProvider": os.environ.get("LLM_PROVIDER", "ollama"),
-        "defaultLlmModel": os.environ.get("LLM_MODEL", "llama3.2:1b"),
-        "defaultLlmBaseUrl": os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1"),
-    }
-
-
-# ---- Env-file sync (project follows .env, dashboard writes it) --------------
-import env_manager as _envm
-
-
-@app.get("/api/env")
-async def get_env():
-    """Return the live env file snapshot (secrets masked). The file is the
-    source of truth — a manual edit is returned on the next GET without a
-    restart, and the dashboard's PUT persists through restarts."""
-    # Reload file into process env so a manual edit is seen live (project follows .env)
-    try:
-        from dotenv import load_dotenv as _ld
-        _ld(str(_envm.ENV_PATH), override=True)
-        # If the file changed GPU-relevant keys, drop memoised probes so next
-        # job sees the new value without a restart
-        import ffmpeg_utils as _fu
-        _fu.reset_encoder_cache()
-    except Exception:
-        pass
-    masked, secrets_set, raw = _envm.masked_snapshot()
-    return {
-        "env": masked,
-        "secretsSet": secrets_set,
-        "allowed": sorted(_envm.ALLOWED_ENV),
-        "fileExists": _envm.env_file_exists(),
-        "path": str(_envm.ENV_PATH),
-    }
-
-
-class EnvUpdateBody(BaseModel):
-    updates: Dict[str, Any]
-
-
-@app.put("/api/env")
-async def put_env(body: EnvUpdateBody):
-    raw_updates = {k.strip(): ("" if v is None else str(v)) for k, v in (body.updates or {}).items() if k.strip()}
-    if not raw_updates:
-        raise HTTPException(status_code=400, detail="No updates provided")
-    # Only allowlisted keys
-    unknown = [k for k in raw_updates if k not in _envm.ALLOWED_ENV]
-    if unknown:
-        raise HTTPException(status_code=400, detail=f"Keys not writable via API: {', '.join(unknown)}")
-    errors = _envm.validate_updates(raw_updates)
-    if errors:
-        raise HTTPException(status_code=400, detail={"validation": errors})
-    _envm.apply_updates(raw_updates)
-    masked, secrets_set, raw = _envm.masked_snapshot()
-    return {"ok": True, "env": masked, "secretsSet": secrets_set}
-
-
-@app.get("/api/llm/models")
-@app.get("/api/openrouter/models")
-async def list_llm_models(request: Request, base_url: Optional[str] = None):
-    """Auto-detect available models from Ollama or any OpenAI-compatible base URL.
-    Returns {models: [{id, name}], count: int, baseUrl: str, provider: str}."""
-    import llm_client
-    hdr_dict = dict(request.headers)
-    target_url = base_url or llm_client.resolve_llm_base_url(hdr_dict)
-    target_key = llm_client.resolve_llm_key(hdr_dict)
-
-    try:
-        models = llm_client.fetch_available_models(base_url=target_url, api_key=target_key)
-        return {
-            "models": models,
-            "count": len(models),
-            "baseUrl": target_url,
-            "provider": "ollama" if llm_client.is_ollama(target_url) else "openai_compatible",
-        }
-    except Exception as e:
-        return {
-            "models": [],
-            "count": 0,
-            "baseUrl": target_url,
-            "warning": str(e)[:200],
-        }
+# System routes (health/config/env/models) live in routers/system.py.
 
 async def _probe_youtube_quality(url: str) -> dict:
     """Run quality_probe.py in a worker thread; {} on any failure (fail-open)."""
@@ -1573,53 +1438,7 @@ def _reject_short_source(duration: float):
         f"short-form content."))
 
 
-# Layouts the caller can let the renderer choose from, mapped to the env var
-# each one is gated on. The renderer only ever picks between layouts that are
-# switched on here.
-#
-# This is opt-in per job, not a detector running on every video, because the
-# detection is not good enough to be trusted unprompted: measured over the
-# 48-clip corpus, routing every video through the on-screen-content check fixed
-# 13 clips and spoiled 13 others (talking heads and corner tickers demoted to a
-# layout they do not need). Asking the person who knows what they uploaded costs
-# them one click and removes that whole class of error. It is also what OpusClip
-# does — its "applicable auto layout" panel lets the user pick which layouts the
-# AI may apply.
-LAYOUT_ENV = {
-    "split": "SPLIT_LAYOUT",          # two speakers stacked
-    "screencast": "SCREENCAST_LAYOUT",  # slides/screen share over the speaker
-    "speaker_cut": "SPEAKER_CUT",     # hard cuts to whoever is talking
-    "punch_in": "PUNCH_IN",           # small push on the clip's beats
-}
-
-# Stacking and cutting both need to know who is speaking.
-LAYOUT_IMPLIES = {
-    "split": ["SPEAKER_SIGNAL"],
-    "speaker_cut": ["SPEAKER_SIGNAL"],
-}
-
-
-def layout_env(requested):
-    """Env overrides for the layouts this job allows. Unknown names are ignored
-    rather than rejected: a newer dashboard must not break an older API.
-
-    The special value "auto" hands the choice to Gemini (one call per video).
-    It composes with explicit picks: layout_picker only ever adds, so asking for
-    "auto,punch_in" means "decide the layout yourself, and punch in regardless".
-    """
-    env = {}
-    for name in requested or []:
-        key = str(name).strip().lower()
-        if key == "auto":
-            env["AUTO_LAYOUT"] = "1"
-            continue
-        var = LAYOUT_ENV.get(key)
-        if not var:
-            continue
-        env[var] = "1"
-        for extra in LAYOUT_IMPLIES.get(key, []):
-            env[extra] = "1"
-    return env
+# Layout allow-list (LAYOUT_ENV/LAYOUT_IMPLIES/layout_env) lives in config.py.
 
 
 @app.post("/api/process")
@@ -2185,7 +2004,7 @@ async def _ensure_job_files(job_id: str, request: Request) -> bool:
 
 
 from editor import VideoEditor
-from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_from_video
+from subtitles import generate_srt, generate_ass, burn_subtitles
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 
@@ -2395,6 +2214,10 @@ class SubtitleRequest(BaseModel):
     # instead of regenerating from the stored transcript — without this, text
     # edits in the modal were silently discarded on the server render path.
     words: Optional[List[CaptionWordIn]] = None
+    # Manual sync nudge in seconds (positive = captions later). Clamped to
+    # ±5s; applied to word times before clipping. For transcripts whose
+    # timestamps drift from the audio (typical with evenly-spread .txt/.md).
+    time_offset: float = 0.0
 
 
 @app.get("/api/clip/{job_id}/{clip_index}/transcript")
@@ -3378,7 +3201,9 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         border_width=req.border_width, highlight_color=req.highlight_color,
         bg_color=req.bg_color, bg_opacity=req.bg_opacity,
         effect=req.effect, base_opacity=req.base_opacity, uppercase=req.uppercase,
+        time_offset=max(-5.0, min(5.0, float(req.time_offset or 0.0))),
     )
+    srt_time_offset = karaoke_opts["time_offset"]
 
     # Output video
     # We create a new file "subtitled_..."
@@ -3395,30 +3220,22 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
     # 25-jul-2026). The endpoint is already gated by require_managed_entitlement
     # above, so this is not an open door.
     #
-    # The dubbed path is the exception and keeps the charge: it runs a fresh
-    # Whisper transcription over the translated audio, which is real work.
-    is_dubbed = filename.startswith("translated_")
+    # The dubbed path is gone with auto-transcription: dubbed clips use the
+    # stored transcript like every other clip.
     subtitle_minutes = (_cloud_config.subtitle_minutes_for(filename)
                         if BILLING_ENABLED else 0)
     reservation_id = await reserve_managed_action(
         request, subtitle_minutes, req.job_id, "subtitle")
 
     try:
-        # 1. Generate SRT — from the existing transcript, or a fresh
-        # transcription when the audio was dubbed (see the metering note above).
-        if is_dubbed:
-            print(f"🎙️ Dubbed video detected, transcribing audio for subtitles...")
-            def run_transcribe_srt():
-                if is_karaoke:
-                    return generate_srt_from_video(input_path, srt_path, style="karaoke", **karaoke_opts)
-                return generate_srt_from_video(input_path, srt_path)
-
-            loop = asyncio.get_event_loop()
-            success = await loop.run_in_executor(None, run_transcribe_srt)
-        elif is_karaoke:
+        # 1. Generate SRT from the existing transcript. (Auto-transcription
+        # was removed, so dubbed videos use the stored transcript like every
+        # other clip — plus the modal's time_offset when its timing drifts.)
+        if is_karaoke:
             success = generate_ass(sub_transcript, sub_start, sub_end, srt_path, **karaoke_opts)
         else:
-            success = generate_srt(sub_transcript, sub_start, sub_end, srt_path)
+            success = generate_srt(sub_transcript, sub_start, sub_end, srt_path,
+                                   time_offset=srt_time_offset)
 
         if not success:
              raise HTTPException(status_code=400, detail="No words found for this clip range.")
@@ -3791,537 +3608,7 @@ async def translate_clip(
         "new_video_url": f"/videos/{req.job_id}/{output_filename}"
     }
 
-class SocialPostRequest(BaseModel):
-    job_id: str
-    clip_index: int
-    api_key: Optional[str] = None  # BYOK; ignored for managed users
-    user_id: Optional[str] = None  # BYOK profile; ignored for managed users
-    platforms: List[str] # ["tiktok", "instagram", "youtube"]
-    # Optional overrides if frontend wants to edit them
-    title: Optional[str] = None
-    description: Optional[str] = None
-    scheduled_date: Optional[str] = None # ISO-8601 string
-    timezone: Optional[str] = "UTC"
+# Social distribution routes live in routers/social.py.
 
-import httpx
 
-@app.post("/api/social/post")
-async def post_to_socials(req: SocialPostRequest, request: Request):
-    await _ensure_job_files(req.job_id, request)
-    if req.job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    # Resolve the Upload-Post key + profile. For managed users the server key is
-    # used and their own profile is forced (body api_key / user_id are ignored).
-    upload_key, forced_profile = await resolve_upload_post(request, req.api_key)
-    if not upload_key:
-        raise HTTPException(status_code=400, detail="Missing Upload-Post API key")
-    post_user = resolve_post_profile(forced_profile, req.user_id)
-
-    job = jobs[req.job_id]
-    await _assert_job_owner(request, job)
-    if 'result' not in job or 'clips' not in job['result']:
-        raise HTTPException(status_code=400, detail="Job result not available")
-
-    try:
-        clip = job['result']['clips'][req.clip_index]
-        # Video URL is relative /videos/..., we need absolute file path
-        # clip['video_url'] is like "/videos/{job_id}/{filename}"
-        # We constructed it as: f"/videos/{job_id}/{clip_filename}"
-        # And file is at f"{OUTPUT_DIR}/{job_id}/{clip_filename}"
-        
-        filename = clip['video_url'].split('/')[-1]
-        file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
-        
-        if not os.path.exists(file_path):
-             raise HTTPException(status_code=404, detail=f"Video file not found: {file_path}")
-
-        # Construct parameters for Upload-Post API
-        # Fallbacks
-        final_title = req.title or clip.get('title', 'Viral Short')
-        final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
-        
-        # Prepare form data
-        url = "https://api.upload-post.com/api/upload"
-        headers = {
-            "Authorization": f"Apikey {upload_key}"
-        }
-
-        # Prepare data as dict (httpx handles lists for multiple values)
-        data_payload = {
-            "user": post_user,
-            "title": final_title,
-            "platform[]": req.platforms, # Pass list directly
-            "async_upload": "true"  # Enable async upload
-        }
-
-        # Add scheduling if present
-        if req.scheduled_date:
-            data_payload["scheduled_date"] = req.scheduled_date
-            if req.timezone:
-                data_payload["timezone"] = req.timezone
-        
-        # Add Platform specifics
-        if "tiktok" in req.platforms:
-             data_payload["tiktok_title"] = final_description
-             data_payload["post_mode"] = TIKTOK_POST_MODE
-             
-        if "instagram" in req.platforms:
-             data_payload["instagram_title"] = final_description
-             data_payload["media_type"] = "REELS"
-
-        if "youtube" in req.platforms:
-             yt_title = req.title or clip.get('video_title_for_youtube_short', final_title)
-             data_payload["youtube_title"] = yt_title
-             data_payload["youtube_description"] = final_description
-             data_payload["privacyStatus"] = "public"
-
-        # Send File
-        # httpx AsyncClient requires async file reading or bytes. 
-        # Since we have MAX_FILE_SIZE_MB, reading into memory is safe-ish.
-        with open(file_path, "rb") as f:
-            file_content = f.read()
-            
-        files = {
-            "video": (filename, file_content, "video/mp4")
-        }
-
-        # Switch to synchronous Client to avoid "sync request with AsyncClient" error with multipart/files
-        with httpx.Client(timeout=120.0) as client:
-            print(f"📡 Sending to Upload-Post for platforms: {req.platforms}")
-            response = client.post(url, headers=headers, data=data_payload, files=files)
-            
-        if response.status_code not in [200, 201, 202]: # Added 201
-             print(f"❌ Upload-Post Error: {response.text}")
-             raise HTTPException(status_code=response.status_code, detail=f"Vendor API Error: {response.text}")
-
-        return response.json()
-
-    except Exception as e:
-        print(f"❌ Social Post Exception: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/social/user")
-async def get_social_user(request: Request):
-    """Proxy to fetch user profiles from Upload-Post.
-
-    BYOK: uses the caller's key and returns all profiles on that account.
-    Managed: uses the server key but returns ONLY the caller's own profile.
-    """
-    api_key, forced_profile = await resolve_upload_post(request, None)
-    if not api_key:
-         raise HTTPException(status_code=400, detail="Missing X-Upload-Post-Key header")
-
-    url = "https://api.upload-post.com/api/uploadposts/users"
-    print(f"🔍 Fetching User ID from: {url}")
-    headers = {"Authorization": f"Apikey {api_key}"}
-    
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code != 200:
-                print(f"❌ Upload-Post User Fetch Error: {resp.text}")
-                raise HTTPException(status_code=resp.status_code, detail=f"Failed to fetch user: {resp.text}")
-            
-            data = resp.json()
-            print(f"🔍 Upload-Post User Response: {data}")
-            
-            user_id = None
-            # The structure is {'success': True, 'profiles': [{'username': '...'}, ...]}
-            profiles_list = []
-            if isinstance(data, dict):
-                 raw_profiles = data.get('profiles', [])
-                 if isinstance(raw_profiles, list):
-                     for p in raw_profiles:
-                         username = p.get('username')
-                         if username:
-                             # Determine connected platforms
-                             socials = p.get('social_accounts', {})
-                             connected = []
-                             # Check typical platforms
-                             for platform in ['tiktok', 'instagram', 'youtube']:
-                                 account_info = socials.get(platform)
-                                 # If it's a dict and typically has data, or just not empty string
-                                 if isinstance(account_info, dict):
-                                     connected.append(platform)
-                             
-                             profiles_list.append({
-                                 "username": username,
-                                 "connected": connected
-                             })
-            
-            # Managed users must only ever see their own profile.
-            if forced_profile is not None:
-                profiles_list = [p for p in profiles_list if p.get("username") == forced_profile]
-
-            if not profiles_list:
-                # Fallback if no profiles found
-                return {"profiles": [], "error": "No profiles found"}
-
-            return {"profiles": profiles_list}
-            
-            
-        except Exception as e:
-             raise HTTPException(status_code=500, detail=str(e))
-
-
-# --- Social analytics (thin proxies over Upload-Post) ---
-# Read-only mirrors of the posting flow above: managed users are locked to their
-# own profile (the body/query profile is ignored), BYOK callers bring their own
-# key and pick the profile with ?user=.
-
-# Separate bucket from _probe_times: analytics polling must not eat into the
-# metering-probe allowance, and vice versa. Protects the managed Upload-Post
-# key's vendor rate limits from a runaway polling loop.
-_analytics_times: dict = {}  # user_id -> [monotonic timestamps]
-ANALYTICS_PER_HOUR = 60
-
-
-def _check_analytics_rate(user_id):
-    now = time.monotonic()
-    times = _analytics_times.setdefault(str(user_id), [])
-    times[:] = [t for t in times if now - t < 3600]
-    if len(times) >= ANALYTICS_PER_HOUR:
-        raise HTTPException(status_code=429,
-                            detail="Too many analytics requests this hour. Please slow down.")
-    times.append(now)
-
-
-async def _social_analytics_auth(request: Request, byok_profile: Optional[str]):
-    api_key, forced_profile = await resolve_upload_post(request, None)
-    if not api_key:
-        if BILLING_ENABLED:
-            # Signed-in free user (or no auth at all): social posting is
-            # paid-only in cloud, so there are no posts to measure either.
-            raise HTTPException(status_code=402, detail={
-                "error": "no_plan",
-                "message": "Social analytics needs an active plan.",
-            })
-        raise HTTPException(status_code=400, detail="Missing X-Upload-Post-Key header")
-    if forced_profile:
-        user = await _user_from_request(request)
-        if user:
-            _check_analytics_rate(user.id)
-    return api_key, resolve_post_profile(forced_profile, byok_profile)
-
-
-async def _upload_post_get(api_key: str, url: str, params: dict):
-    headers = {"Authorization": f"Apikey {api_key}"}
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.get(url, headers=headers, params=params)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=f"Vendor API Error: {resp.text}")
-    return resp.json()
-
-
-@app.get("/api/social/analytics")
-async def social_profile_analytics(
-    request: Request,
-    platforms: str = "tiktok,instagram,youtube",
-    user: Optional[str] = None,
-):
-    """Aggregated profile analytics: followers, views, engagement per platform."""
-    api_key, profile = await _social_analytics_auth(request, user)
-    return await _upload_post_get(
-        api_key,
-        f"https://api.upload-post.com/api/analytics/{profile}",
-        {"platforms": platforms},
-    )
-
-
-@app.get("/api/social/analytics/posts")
-async def social_post_analytics(
-    request: Request,
-    platform: Optional[str] = None,
-    limit: Optional[int] = None,
-    cursor: Optional[str] = None,
-    since: Optional[str] = None,
-    until: Optional[str] = None,
-    user: Optional[str] = None,
-):
-    """Per-post metrics for the profile's published posts (Upload-Post cache)."""
-    api_key, profile = await _social_analytics_auth(request, user)
-    params = {"user": profile}
-    for key, value in (("platform", platform), ("limit", limit),
-                       ("cursor", cursor), ("since", since), ("until", until)):
-        if value is not None:
-            params[key] = value
-    return await _upload_post_get(
-        api_key,
-        "https://api.upload-post.com/api/uploadposts/post-analytics/cached",
-        params,
-    )
-
-
-_PERIOD_DAYS = {"last_day": 1, "last_week": 7, "last_month": 30,
-                "last_3months": 90, "last_year": 365}
-
-
-def _post_row_views(row: dict) -> float:
-    metrics = row.get("post_metrics") or row.get("metrics") or row
-    for key in ("views", "impressions", "plays"):
-        value = metrics.get(key)
-        if value is not None:
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return 0.0
-    return 0.0
-
-
-@app.get("/api/social/analytics/impressions")
-async def social_total_impressions(
-    request: Request,
-    period: Optional[str] = None,     # last_day | last_week | last_month | last_3months | last_year
-    start_date: Optional[str] = None,  # YYYY-MM-DD
-    end_date: Optional[str] = None,
-    platform: Optional[str] = None,
-    breakdown: Optional[bool] = None,
-    user: Optional[str] = None,
-):
-    """Total impressions for the profile over a window.
-
-    Computed by aggregating the profile-scoped post cache instead of proxying
-    Upload-Post's /total-impressions: that endpoint echoes the requested
-    profile but returns account-wide numbers (observed 2026-08-21 — a profile
-    with zero posts got 85K Instagram impressions), which for managed users
-    would leak other tenants' aggregates. The cache endpoint IS scoped by
-    ?user=, so summing it is both correct and cheap.
-    """
-    api_key, profile = await _social_analytics_auth(request, user)
-
-    days = _PERIOD_DAYS.get(period or "", 30)
-    since = start_date or (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-    params = {"user": profile, "since": since, "limit": 200}
-    if end_date:
-        params["until"] = end_date
-    if platform:
-        params["platform"] = platform
-
-    total = 0.0
-    per_platform: dict = {}
-    for _page in range(5):  # 1000 posts is far beyond any real profile window
-        data = await _upload_post_get(
-            api_key,
-            "https://api.upload-post.com/api/uploadposts/post-analytics/cached",
-            params,
-        )
-        rows = data.get("posts") or data.get("data") or data.get("items") or []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            views = _post_row_views(row)
-            total += views
-            name = row.get("platform")
-            if name:
-                per_platform[name] = per_platform.get(name, 0) + views
-        cursor = data.get("next_cursor")
-        if not cursor or not data.get("has_more"):
-            break
-        params["cursor"] = cursor
-
-    result = {
-        "profile_username": profile,
-        "total_impressions": round(total),
-        "per_platform": {k: round(v) for k, v in per_platform.items()},
-    }
-    return result
-
-
-async def _scheduled_posts_for(api_key: str, profile: str) -> list:
-    """The caller's pending scheduled posts.
-
-    Upload-Post's GET /uploadposts/schedule takes no profile filter and returns
-    everything the *account* has pending — with the managed key that is every
-    OpenShorts user's queue, so the filter below is what keeps one tenant from
-    seeing (or cancelling) another's. Same class of bug as the impressions
-    endpoint; do not "simplify" it away.
-    """
-    data = await _upload_post_get(
-        api_key, "https://api.upload-post.com/api/uploadposts/schedule", {})
-    rows = data.get("scheduled_posts") or data.get("data") or []
-    return [r for r in rows
-            if isinstance(r, dict) and r.get("profile_username") == profile]
-
-
-@app.get("/api/social/scheduled")
-async def social_scheduled(request: Request, user: Optional[str] = None):
-    """Pending scheduled posts for the caller's profile, soonest first."""
-    api_key, profile = await _social_analytics_auth(request, user)
-    rows = await _scheduled_posts_for(api_key, profile)
-    rows.sort(key=lambda r: r.get("scheduled_date") or "")
-    return {"profile_username": profile, "scheduled_posts": rows}
-
-
-@app.delete("/api/social/scheduled/{job_id}")
-async def social_cancel_scheduled(job_id: str, request: Request, user: Optional[str] = None):
-    """Cancel one pending scheduled post, if it belongs to the caller."""
-    api_key, profile = await _social_analytics_auth(request, user)
-    rows = await _scheduled_posts_for(api_key, profile)
-    if not any(r.get("job_id") == job_id for r in rows):
-        # 404 rather than 403: never confirm that someone else's job exists.
-        raise HTTPException(status_code=404, detail="Scheduled post not found")
-    headers = {"Authorization": f"Apikey {api_key}"}
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.delete(
-            f"https://api.upload-post.com/api/uploadposts/schedule/{job_id}",
-            headers=headers)
-    if resp.status_code not in (200, 202, 204):
-        raise HTTPException(status_code=resp.status_code,
-                            detail=f"Vendor API Error: {resp.text}")
-    return {"success": True, "job_id": job_id}
-
-
-@app.get("/gallery", response_class=HTMLResponse)
-async def gallery_html_page():
-    """SEO gallery page with all generated UGC videos."""
-    import html as html_mod
-    loop = asyncio.get_running_loop()
-    videos = await loop.run_in_executor(None, list_video_gallery, 100)
-
-    cards_html = ""
-    ld_items = []
-    for i, v in enumerate(videos):
-        title = html_mod.escape(v.get("title", "Untitled"))
-        video_url = v.get("video_url", "")
-        actor_url = v.get("actor_url", "")
-        video_id = v.get("video_id", "")
-        duration = v.get("duration", 0)
-        mode = v.get("video_mode", "")
-        product = html_mod.escape(v.get("product_name", ""))
-        caption = html_mod.escape(v.get("caption", "")[:120])
-
-        mode_badge = '<span style="background:#22c55e;color:#000;padding:2px 8px;border-radius:9999px;font-size:10px;font-weight:700">LOW COST</span>' if mode == "lowcost" else '<span style="background:#8b5cf6;color:#fff;padding:2px 8px;border-radius:9999px;font-size:10px;font-weight:700">PREMIUM</span>'
-
-        cards_html += f'''
-        <a href="/video/{video_id}" style="text-decoration:none;color:inherit">
-          <div style="background:#18181b;border-radius:16px;overflow:hidden;border:1px solid #27272a;transition:transform 0.2s" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
-            <div style="position:relative;aspect-ratio:9/16;background:#000">
-              <video src="{video_url}" poster="{actor_url}" muted playsinline preload="metadata"
-                     onmouseenter="this.play()" onmouseleave="this.pause();this.currentTime=0"
-                     style="width:100%;height:100%;object-fit:cover"></video>
-              <div style="position:absolute;top:8px;right:8px">{mode_badge}</div>
-            </div>
-            <div style="padding:12px">
-              <h2 style="font-size:14px;font-weight:600;margin:0 0 4px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{title}</h2>
-              <p style="font-size:11px;color:#71717a;margin:0">{duration:.0f}s · {product}</p>
-            </div>
-          </div>
-        </a>'''
-
-        ld_items.append(f'{{"@type":"ListItem","position":{i+1},"url":"https://openshorts.app/video/{video_id}","name":"{title}"}}')
-
-    ld_json = f'{{"@context":"https://schema.org","@type":"CollectionPage","name":"AI UGC Video Gallery","mainEntity":{{"@type":"ItemList","numberOfItems":{len(videos)},"itemListElement":[{",".join(ld_items)}]}}}}'
-
-    return f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI UGC Video Gallery | OpenShorts</title>
-<meta name="description" content="Browse {len(videos)} AI-generated UGC marketing videos. Create viral TikTok and Instagram Reels for your SaaS product.">
-<meta name="robots" content="index, follow">
-<meta property="og:title" content="AI UGC Video Gallery | OpenShorts">
-<meta property="og:type" content="website">
-<meta property="og:description" content="Browse AI-generated UGC marketing videos for SaaS products.">
-<script type="application/ld+json">{ld_json}</script>
-<style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{background:#0a0a0c;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,sans-serif}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:20px;padding:20px;max-width:1400px;margin:0 auto}}
-nav{{padding:20px 40px;border-bottom:1px solid #27272a;display:flex;align-items:center;justify-content:space-between}}
-h1{{font-size:28px;font-weight:700;padding:40px 20px 0;text-align:center}}
-.subtitle{{text-align:center;color:#71717a;font-size:14px;padding:8px 20px 20px}}
-.cta{{display:inline-block;background:#8b5cf6;color:#fff;padding:10px 24px;border-radius:12px;text-decoration:none;font-weight:600;font-size:14px}}
-</style>
-</head>
-<body>
-<nav><strong style="font-size:18px">OpenShorts</strong><a href="/" class="cta">Create Your Video</a></nav>
-<h1>AI-Generated UGC Videos</h1>
-<p class="subtitle">{len(videos)} videos generated · Low Cost & Premium modes</p>
-<div class="grid">{cards_html}</div>
-<div style="text-align:center;padding:40px"><a href="/" class="cta">Create Your Own UGC Video</a></div>
-</body></html>'''
-
-
-@app.get("/video/{video_id}", response_class=HTMLResponse)
-async def video_html_page(video_id: str):
-    """SEO individual video page with og:video meta tags."""
-    import html as html_mod
-    loop = asyncio.get_running_loop()
-    videos = await loop.run_in_executor(None, list_video_gallery, 200)
-    meta = next((v for v in videos if v.get("video_id") == video_id), None)
-    if not meta:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    title = html_mod.escape(meta.get("title", "Untitled"))
-    caption = html_mod.escape(meta.get("caption", ""))
-    narration = html_mod.escape(meta.get("full_narration", ""))
-    video_url = meta.get("video_url", "")
-    actor_url = meta.get("actor_url", "")
-    duration = meta.get("duration", 0)
-    mode = meta.get("video_mode", "")
-    product = html_mod.escape(meta.get("product_name", ""))
-    product_url = html_mod.escape(meta.get("product_url", ""))
-    language = meta.get("language", "en")
-    hashtags = " ".join(meta.get("hashtags", []))
-    cost = meta.get("cost_estimate", {}).get("total", 0)
-    created = meta.get("created_at", "")
-    actor_desc = html_mod.escape(meta.get("actor_description", ""))
-
-    ld_json = f'{{"@context":"https://schema.org","@type":"VideoObject","name":"{title}","description":"{caption}","thumbnailUrl":"{actor_url}","contentUrl":"{video_url}","uploadDate":"{created}","duration":"PT{int(duration)}S","width":1080,"height":1920,"inLanguage":"{language}"}}'
-
-    mode_label = "Low Cost" if mode == "lowcost" else "Premium"
-
-    return f'''<!DOCTYPE html>
-<html lang="{language}">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} - AI UGC Video | OpenShorts</title>
-<meta name="description" content="{caption} {hashtags}">
-<meta property="og:type" content="video.other">
-<meta property="og:title" content="{title}">
-<meta property="og:description" content="{caption}">
-<meta property="og:video" content="{video_url}">
-<meta property="og:video:type" content="video/mp4">
-<meta property="og:video:width" content="1080">
-<meta property="og:video:height" content="1920">
-<meta property="og:image" content="{actor_url}">
-<meta name="twitter:card" content="player">
-<meta name="twitter:title" content="{title}">
-<meta name="twitter:image" content="{actor_url}">
-<script type="application/ld+json">{ld_json}</script>
-<style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{background:#0a0a0c;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,sans-serif}}
-nav{{padding:20px 40px;border-bottom:1px solid #27272a;display:flex;align-items:center;gap:16px}}
-nav a{{color:#a1a1aa;text-decoration:none;font-size:14px}}
-.container{{max-width:1000px;margin:0 auto;padding:40px 20px;display:grid;grid-template-columns:1fr 1fr;gap:40px}}
-@media(max-width:768px){{.container{{grid-template-columns:1fr}}}}
-video{{width:100%;border-radius:16px;background:#000}}
-h1{{font-size:22px;font-weight:700;margin-bottom:8px}}
-.meta{{color:#71717a;font-size:13px;margin-bottom:20px}}
-.section{{margin-bottom:20px}}
-.section h2{{font-size:13px;color:#71717a;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}}
-.section p{{font-size:14px;line-height:1.6}}
-.badge{{display:inline-block;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:700}}
-.cta{{display:inline-block;background:#8b5cf6;color:#fff;padding:10px 24px;border-radius:12px;text-decoration:none;font-weight:600;font-size:14px;margin-top:20px}}
-</style>
-</head>
-<body>
-<nav><strong>OpenShorts</strong><a href="/gallery">Gallery</a><span style="color:#3f3f46">›</span><span style="color:#e4e4e7;font-size:14px">{title}</span></nav>
-<div class="container">
-<div><video src="{video_url}" poster="{actor_url}" controls autoplay playsinline style="aspect-ratio:9/16;object-fit:cover"></video></div>
-<div>
-<h1>{title}</h1>
-<p class="meta">{duration:.0f}s · {mode_label} · ${cost:.2f} · {product}</p>
-<div class="section"><h2>Caption</h2><p>{caption}</p><p style="color:#8b5cf6;margin-top:4px">{hashtags}</p></div>
-<div class="section"><h2>Script</h2><p>{narration}</p></div>
-<div class="section"><h2>Actor</h2><p>{actor_desc}</p></div>
-{f'<div class="section"><h2>Product</h2><p><a href="{product_url}" style="color:#8b5cf6" target="_blank">{product}</a></p></div>' if product_url else ''}
-<a href="/gallery">← Back to Gallery</a>
-<br><a href="/" class="cta">Create Your Own</a>
-</div>
-</div>
-</body></html>'''
-
-
+# SEO gallery pages (/gallery, /video/{id}) live in routers/gallery.py.

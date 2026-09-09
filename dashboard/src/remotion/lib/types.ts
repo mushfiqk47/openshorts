@@ -8,7 +8,7 @@ export interface CaptionWord {
 }
 
 // --- Subtitle config ---
-export type SubtitleAnimation = "none" | "word-highlight" | "pop" | "karaoke";
+export type SubtitleAnimation = "none" | "word-highlight" | "pop" | "karaoke" | "box";
 export type SubtitlePosition = "top" | "middle" | "bottom";
 
 export interface SubtitleStyle {
@@ -29,6 +29,9 @@ export interface SubtitleStyle {
 export interface SubtitleConfig {
   captions: CaptionWord[];
   position: SubtitlePosition;
+  // Manual sync nudge in milliseconds (positive = captions later).
+  // Mirrors the server burn's time_offset so preview shows final timing.
+  timeOffsetMs?: number;
   style: SubtitleStyle;
 }
 

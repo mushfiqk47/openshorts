@@ -77,9 +77,9 @@ All generated videos and avatars are saved to a public gallery with SEO pages fo
 ## Key Features
 
 ### Clip Generator
-- **Viral Moment Detection**: Google Gemini 3.0 Flash analyzes transcripts and scene boundaries to detect 3-15 high-potential moments
+- **Viral Moment Detection**: Gemini (default gemini-2.5-flash) analyzes transcripts and scene boundaries to detect 3-15 high-potential moments
 - **Smart 9:16 Cropping**: Dual-mode AI reframing — TRACK mode (MediaPipe + YOLOv8 face tracking) and GENERAL mode (blurred background)
-- **Auto Subtitles**: faster-whisper with word-level timestamps, styled and burned into clips
+- **Auto Subtitles**: styled subtitles burned into clips, cut snap-to-word from your transcript file
 - **AI Voice Dubbing**: ElevenLabs integration for 30+ languages with voice cloning
 - **Hook Text Overlays**: AI-generated attention-grabbing text overlays
 - **AI Video Effects**: Gemini-generated FFmpeg filters for professional effects
@@ -98,7 +98,7 @@ All generated videos and avatars are saved to a public gallery with SEO pages fo
 - AI-powered title generation with 10 viral options
 - Interactive refinement chat for titles
 - AI thumbnail generation with custom face + background
-- Auto descriptions with chapter timestamps from Whisper transcript
+- Auto descriptions with chapter timestamps from the transcript
 - Direct YouTube publishing via Upload-Post
 
 ### Social Auto-Publishing
@@ -224,7 +224,7 @@ Navigate to **`http://localhost:5175`**
 
 ### Clip Generator
 1. **Ingest** — Local video upload (or self-hosted URL ingest via yt-dlp)
-2. **Transcribe** — faster-whisper with word-level timestamps
+2. **Transcript** — you supply the transcript file (.srt/.vtt/.txt/.md/.json, required at submit; auto-transcription was removed)
 3. **Detect** — PySceneDetect for scene boundaries
 4. **Analyze** — Gemini identifies 3-15 viral moments (15-60s each)
 5. **Extract** — FFmpeg precise clip cutting
@@ -331,11 +331,29 @@ lives in [`examples/n8n/`](examples/n8n/).
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python 3.11, FastAPI, google-genai, faster-whisper, ultralytics (YOLOv8), mediapipe, opencv-python, yt-dlp, FFmpeg, httpx |
+| Backend | Python 3.11, FastAPI, google-genai, ultralytics (YOLOv8), mediapipe, opencv-python, yt-dlp, FFmpeg, httpx |
 | Frontend | React 18, Vite 4, Tailwind CSS 3.4 |
 | AI APIs | Google Gemini, fal.ai (Flux, Hailuo, VEED, Kling), ElevenLabs |
 | Infrastructure | Docker + Docker Compose, AWS S3 |
 | Publishing | Upload-Post API (TikTok, Instagram, YouTube) |
+
+---
+
+## Project Structure
+
+```
+app.py                  # FastAPI composition root + job-core routes (~3,600 lines)
+config.py               # every env-derived constant + layout allow-list (one import-time seam)
+state.py                # shared job store: jobs, queue, semaphore (singletons)
+routers/                # split route clusters — system (health/config/env/models),
+                        #   gallery (SEO pages), social (post/profiles/analytics/schedule)
+main.py                 # clip pipeline composition root (~1,600 lines)
+pipeline/tracking.py    # SmoothedCameraman + SpeakerTracker (numpy-only, no ML stack)
+cloud/                  # optional paid-mode package (imported only when BILLING_ENABLED=1)
+dashboard/src/          # React app: App.jsx composes; ui/ primitives; hooks/useApiKeys.js
+                        #   holds key state; heavy modals + Remotion renderer load on demand
+tests/                  # pytest suite (506 tests) — `python -m pytest tests/ -q`
+```
 
 ---
 

@@ -61,3 +61,6 @@ check_*.py
 # Logs
 *.log
 
+# Python build artifacts (never track egg-info)
+*.egg-info/
+
