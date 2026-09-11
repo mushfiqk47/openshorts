@@ -382,7 +382,7 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                     bg_color: options.bgColor,
                     bg_opacity: options.bgOpacity,
                     style: options.style || 'classic',
-                    highlight_color: options.highlightColor || '#FFD700',
+                    highlight_color: options.highlightColor || '#3B5BFF',
                     effect: options.effect || 'none',
                     base_opacity: options.baseOpacity ?? 1.0,
                     uppercase: options.uppercase || false,
@@ -1025,8 +1025,8 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                 onClose={() => setShowSubtitleModal(false)}
                 onGenerate={handleSubtitle}
                 onApplyAll={onBulkSubtitle ? async (options) => {
-                    await onBulkSubtitle(options);
-                    setShowSubtitleModal(false);
+                    const summary = await onBulkSubtitle(options);
+                    if (!summary || summary.errors === 0) setShowSubtitleModal(false);
                 } : undefined}
                 onRemove={handleRemoveSubtitles}
                 bulkCount={clipCount}

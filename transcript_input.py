@@ -40,19 +40,28 @@ def _ts_to_seconds(h, m, s, ms):
 
 
 def _spread_words(text, start, end):
-    """Evenly split [start, end] across the words in text."""
+    """Split [start, end] across the words in text, proportional to length.
+
+    Even splitting gives "a" the same duration as "assessment", so the
+    karaoke highlight holds short words too long and cuts long ones early.
+    Weighting by character count (with a floor of 2 so single letters stay
+    visible) keeps the total span identical while tracking speech rhythm."""
     tokens = _WORD_RE.findall(text)
     if not tokens:
         return []
-    n = len(tokens)
     span = max(float(end) - float(start), 0.0)
-    # Guard against zero-length cues (overlapping timestamps in the wild).
-    step = span / n if span > 0 else 0.0
+    weights = [max(len(t), 2) for t in tokens]
+    total = sum(weights)
     out = []
-    for i, tok in enumerate(tokens):
-        ws = float(start) + step * i
-        we = float(start) + step * (i + 1) if span > 0 else float(start)
+    cursor = float(start)
+    for tok, w in zip(tokens, weights):
+        share = span * w / total if span > 0 and total > 0 else 0.0
+        ws = cursor
+        we = cursor + share if span > 0 else float(start)
         out.append({"word": " " + tok, "start": round(ws, 3), "end": round(we, 3)})
+        cursor += share
+    if out:
+        out[-1]["end"] = round(float(end), 3)  # absorb rounding drift
     return out
 
 

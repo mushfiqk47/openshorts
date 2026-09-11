@@ -317,12 +317,17 @@ function App() {
 
 
   // Apply one subtitle style to every clip of the job, sequentially.
+  // Bulk failures used to vanish silently (counted, never shown, modal closed
+  // anyway) so a dead server burn read as a dead button: the first error is
+  // now surfaced, quota trips the top-up flow, and the modal stays open.
   const handleBulkSubtitles = async (options) => {
     const clips = results?.clips || [];
     const total = clips.length;
-    if (!total) return;
+    if (!total) return { errors: 0 };
     setBulkSub({ running: true, current: 0, total, errors: 0 });
     let errors = 0;
+    let firstError = '';
+    let quotaHit = null;
     for (let i = 0; i < total; i++) {
       setBulkSub({ running: true, current: i + 1, total, errors });
       try {
@@ -341,25 +346,44 @@ function App() {
             bg_color: options.bgColor,
             bg_opacity: options.bgOpacity,
             style: options.style || 'classic',
-            highlight_color: options.highlightColor || '#FFD700',
+            highlight_color: options.highlightColor || '#3B5BFF',
             effect: options.effect || 'none',
             base_opacity: options.baseOpacity ?? 1.0,
             uppercase: options.uppercase || false,
+            time_offset: options.time_offset ?? 0,
             // Chain from the clip's current server file (its video_url basename).
             input_filename: (clips[i].video_url || '').split('/').pop(),
           }),
         });
-        if (!res.ok) errors++;
-      } catch {
+        if (!res.ok) {
+          errors++;
+          if (!firstError) {
+            try { firstError = await res.text(); } catch { firstError = ''; }
+            if (!firstError) firstError = `clip ${i + 1} failed (${res.status})`;
+          }
+        }
+      } catch (e) {
         errors++;
+        if (e instanceof QuotaError) quotaHit = e;
+        else if (!firstError) firstError = e?.message || `clip ${i + 1} failed`;
       }
     }
-    setBulkSub({ running: false, current: total, total, errors });
+    setBulkSub({ running: false, current: total, total, errors, error: firstError, quota: !!quotaHit });
+    if (quotaHit) {
+      if (me?.status === 'trialing') setShowTrialUpgrade(true);
+      else {
+        setTopUpInfo({ required: quotaHit.minutesRequired, remaining: quotaHit.minutesRemaining });
+        setShowTopUp(true);
+      }
+    }
     // Refresh results so each ResultCard picks up its new subtitled video_url.
-    try {
-      const data = await pollJob(jobId);
-      if (data.result) setResults(data.result);
-    } catch { /* keep current results */ }
+    if (errors < total) {
+      try {
+        const data = await pollJob(jobId);
+        if (data.result) setResults(data.result);
+      } catch { /* keep current results */ }
+    }
+    return { errors, firstError };
   };
 
   const handleDownloadAll = async () => {

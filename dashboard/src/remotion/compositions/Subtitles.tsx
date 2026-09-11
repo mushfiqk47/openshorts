@@ -209,17 +209,14 @@ const WordSpan: React.FC<WordSpanProps> = ({
         break;
       }
       case "box": {
-        // Mirrors the burn's box effect: white text inside a thick
-        // highlight-colored outline (server draws \bord+3 in highlight).
+        // Visla-style pill: white text on a saturated-blue rounded pill.
+        // The burned ASS approximates this with a thick highlight outline
+        // (server draws \bord+3 in highlight); the browser draws the true pill.
         color = "#FFFFFF";
-        const boxW = style.borderWidth + 3;
         extraStyle = {
-          textShadow: [
-            `${boxW}px 0 0 ${style.highlightColor}`,
-            `-${boxW}px 0 0 ${style.highlightColor}`,
-            `0 ${boxW}px 0 ${style.highlightColor}`,
-            `0 -${boxW}px 0 ${style.highlightColor}`,
-          ].join(", "),
+          backgroundColor: style.highlightColor,
+          borderRadius: 8,
+          padding: "2px 10px",
         };
         break;
       }
@@ -229,6 +226,8 @@ const WordSpan: React.FC<WordSpanProps> = ({
   }
 
   // Text stroke via textShadow (CSS paint-order not reliable in Remotion)
+  // 8-point ring (diagonals included) so the outline reads as a smooth thin
+  // stroke instead of a blocky plus-shaped halo at preview scale.
   const strokeShadow =
     style.borderWidth > 0
       ? [
@@ -236,10 +235,14 @@ const WordSpan: React.FC<WordSpanProps> = ({
           `-${style.borderWidth}px 0 0 ${style.borderColor}`,
           `0 ${style.borderWidth}px 0 ${style.borderColor}`,
           `0 -${style.borderWidth}px 0 ${style.borderColor}`,
+          `${style.borderWidth}px ${style.borderWidth}px 0 ${style.borderColor}`,
+          `-${style.borderWidth}px ${style.borderWidth}px 0 ${style.borderColor}`,
+          `${style.borderWidth}px -${style.borderWidth}px 0 ${style.borderColor}`,
+          `-${style.borderWidth}px -${style.borderWidth}px 0 ${style.borderColor}`,
         ].join(", ")
       : "none";
 
-  // Box replaces the dark stroke with its own highlight outline (like the burn).
+  // Box draws a solid highlight pill behind white text, so the dark stroke is dropped on the active word.
   const boxActive = animation === "box" && isActive;
   return (
     <span

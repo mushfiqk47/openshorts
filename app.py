@@ -2201,11 +2201,11 @@ class SubtitleRequest(BaseModel):
     font_name: str = "Verdana"
     font_color: str = "#FFFFFF"
     border_color: str = "#000000"
-    border_width: int = 2
+    border_width: int = 1
     bg_color: str = "#000000"
     bg_opacity: float = 0.0
     style: str = "classic"  # classic (uniform color) or karaoke (word highlight)
-    highlight_color: str = "#FFD700"
+    highlight_color: str = "#3B5BFF"
     effect: str = "none"  # none | glow | pop | box (karaoke only)
     base_opacity: float = 1.0  # opacity of non-active words (dimmed modern look)
     uppercase: bool = False

@@ -88,7 +88,7 @@ def _normalize_subtitle_word(value):
 
 
 def _collect_word_blocks(transcript, clip_start, clip_end, max_chars=20, max_duration=2.0,
-                          time_offset=0.0):
+                          max_words=3, time_offset=0.0):
     """
     Flatten transcript words for a clip range and group them into short blocks
     suitable for vertical video. Returns a list of blocks; each block is a list
@@ -138,7 +138,9 @@ def _collect_word_blocks(transcript, clip_start, clip_end, max_chars=20, max_dur
         current_text_len = sum(len(w['word']) + 1 for w in current_block)
         duration = word['end'] - block_start
 
-        if current_text_len + len(word['word']) > max_chars or duration > max_duration:
+        if (current_text_len + len(word['word']) > max_chars
+                or duration > max_duration
+                or len(current_block) >= max_words):
             blocks.append(current_block)
             current_block = [word]
             block_start = word['start']
@@ -151,13 +153,13 @@ def _collect_word_blocks(transcript, clip_start, clip_end, max_chars=20, max_dur
 
 
 def generate_srt(transcript, clip_start, clip_end, output_path, max_chars=20, max_duration=2.0,
-                   time_offset=0.0):
+                   max_words=3, time_offset=0.0):
     """
     Generates an SRT file from the transcript for a specific time range.
     Groups words into short lines suitable for vertical video.
     """
     blocks = _collect_word_blocks(transcript, clip_start, clip_end, max_chars, max_duration,
-                                  time_offset=time_offset)
+                                  max_words, time_offset=time_offset)
     if not blocks:
         return False
 
@@ -182,28 +184,29 @@ SAFE_MARGIN_V = 43
 
 
 # The caption look applied automatically to every generated clip. Chosen by
-# rendering four candidates on a real clip and comparing them (25-jul-2026):
-# white Anton uppercase with a yellow active word, heavy black outline, gentle
-# pop. Yellow because it is the one colour that almost never occurs in footage,
-# so the active word reads instantly on any background; the base text stays
-# fully opaque (dimming it tested worse over bright scenes). This is a starting
-# point, not a cage — the subtitle modal still overrides every field.
+# Visla-style pill default (10-sep-2026):
+# white rounded-sans base, thin black outline, active word as white on a
+# saturated-blue pill. Blue reads instantly on any footage and matches the
+# reference look; the base text stays fully opaque and title case is kept
+# (dimming tested worse over bright scenes). Effect "box" draws the blue
+# surround in burned ASS; Remotion draws a true rounded pill. Modal overrides all.
 AUTO_CAPTION_FONT_SIZE = int(os.environ.get("CAPTION_FONT_SIZE", "13"))
 
 AUTO_CAPTION_STYLE = {
     "style": "karaoke",
     "alignment": "bottom",
-    "font_name": "Anton",
+    "font_name": "Liberation Sans",
     "font_size": AUTO_CAPTION_FONT_SIZE,
     "font_color": "#FFFFFF",
-    "highlight_color": "#FFE500",
+    "highlight_color": "#3B5BFF",
     "border_color": "#000000",
-    "border_width": 3,
-    "effect": "pop",
+    "border_width": 1,
+    "effect": "box",
     "base_opacity": 1.0,
-    "uppercase": True,
+    "uppercase": False,
     "max_chars": 16,
     "max_duration": 1.4,
+    "max_words": 3,
 }
 
 
@@ -255,9 +258,9 @@ def _dim_hex_color(hex_color, opacity, fallback="FFFFFF"):
 
 
 def generate_ass(transcript, clip_start, clip_end, output_path,
-                 max_chars=20, max_duration=2.0, alignment='bottom',
+                 max_chars=20, max_duration=2.0, max_words=3, alignment='bottom',
                  fontsize=13, font_name="Verdana", font_color="#FFFFFF",
-                 border_color="#000000", border_width=2,
+                 border_color="#000000", border_width=1,
                  highlight_color="#FFD700", bg_color="#000000", bg_opacity=0.0,
                  effect="none", base_opacity=1.0, uppercase=False,
                  margin_v=SAFE_MARGIN_V, time_offset=0.0):
@@ -273,7 +276,7 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     modern captioneer look (e.g. 0.4).
     """
     blocks = _collect_word_blocks(transcript, clip_start, clip_end, max_chars, max_duration,
-                                  time_offset=time_offset)
+                                  max_words, time_offset=time_offset)
     if not blocks:
         return False
 
@@ -291,10 +294,10 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     # _dim_hex_color); the active word overrides the color inline.
     primary_colour = hex_to_ass_color(_dim_hex_color(font_color, base_opacity), 1.0)
     bg_opacity = _clamp_number(bg_opacity, 0.0, 1.0, 0.0)
-    border_width = _clamp_number(border_width, 0, 10, 2)
+    border_width = _clamp_number(border_width, 0, 2, 1)
 
     if bg_opacity > 0:
-        border_style = 3
+        border_style = 1
         outline_colour = hex_to_ass_color(bg_color, bg_opacity, fallback="000000")
         outline_width = 1
     else:
@@ -308,11 +311,11 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     # Inline override tags for the active word; {\r} after it resets to the
     # (dimmed) style so the rest of the block stays untouched.
     if effect == "glow":
-        glow_bord = max(3, int(outline_width) + 2)
+        glow_bord = 1
         active_prefix = (f"{{\\c&HFFFFFF&\\3c{highlight_inline}"
                          f"\\bord{glow_bord}\\blur4}}")
     elif effect == "box":
-        box_bord = max(4, int(outline_width) + 3)
+        box_bord = 1
         active_prefix = (f"{{\\c&HFFFFFF&\\3c{highlight_inline}"
                          f"\\bord{box_bord}\\blur0}}")
     elif effect == "pop":
@@ -344,12 +347,21 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     )
 
     events = []
+    # Karaoke sync: switch the highlight ~30ms BEFORE the word starts (hides
+    # libass/player latency so it feels on-beat), never let an event collapse
+    # under 80ms (centisecond rounding would drop fast words entirely), and
+    # cap the last word's hold so it can't linger through trailing silence.
+    _LEAD, _MIN_EV, _HOLD = 0.03, 0.08, 0.30
     for block in blocks:
         for i, word in enumerate(block):
-            # Event runs until the next word starts (no flicker in gaps);
-            # the last word holds until the block ends.
-            ev_start = block[0]['start'] if i == 0 else word['start']
-            ev_end = block[i + 1]['start'] if i < len(block) - 1 else block[-1]['end']
+            base_start = block[0]['start'] if i == 0 else word['start']
+            ev_start = max(0.0, base_start - (0.0 if i == 0 else _LEAD))
+            if i < len(block) - 1:
+                ev_end = block[i + 1]['start'] - _LEAD
+            else:
+                ev_end = min(block[-1]['end'], word['end'] + _HOLD)
+            if ev_end - ev_start < _MIN_EV:
+                ev_end = ev_start + _MIN_EV
             if ev_end <= ev_start:
                 continue
 
@@ -424,7 +436,7 @@ def _sanitize_font_name(name):
 
 def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=13,
                    font_name="Verdana", font_color="#FFFFFF",
-                   border_color="#000000", border_width=2,
+                   border_color="#000000", border_width=1,
                    bg_color="#000000", bg_opacity=0.0):
     """
     Burns subtitles into the video using FFmpeg.
@@ -450,7 +462,7 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=13,
 
     safe_font_name = _sanitize_font_name(font_name)
     bg_opacity = _clamp_number(bg_opacity, 0.0, 1.0, 0.0)
-    border_width = _clamp_number(border_width, 0, 10, 2)
+    border_width = _clamp_number(border_width, 0, 2, 1)
 
     # Path handling for FFmpeg filter syntax
     safe_srt_path = _escape_ffmpeg_filter_value(srt_path)

@@ -21,6 +21,7 @@ export const notoSerifFontFace = `
  */
 export const SUBTITLE_FONTS: Record<string, string> = {
   Verdana: "Verdana, Geneva, sans-serif",
+  "Liberation Sans": "'Liberation Sans', Arial, sans-serif",
   Arial: "Arial, Helvetica, sans-serif",
   Impact: "Impact, Haettenschweiler, sans-serif",
   Helvetica: "Helvetica, Arial, sans-serif",

@@ -6,6 +6,7 @@ import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 
 const FONT_OPTIONS = [
+    { value: 'Liberation Sans', label: 'Liberation Sans' },
     { value: 'Verdana', label: 'Verdana' },
     { value: 'Arial', label: 'Arial' },
     { value: 'Impact', label: 'Impact' },
@@ -24,6 +25,7 @@ const COLOR_PRESETS = [
 ];
 
 const HIGHLIGHT_PRESETS = [
+    { color: '#3B5BFF', label: 'Visla Blue' },
     { color: '#FFDD00', label: 'Gold' },
     { color: '#FF4444', label: 'Red' },
     { color: '#00FF88', label: 'Green' },
@@ -60,6 +62,7 @@ const SIZE_TO_FONTSIZE = {
 // Ready-made caption looks burned server-side as karaoke ASS (word highlight):
 // dimmed base text + strong active word, optional glow/pop/box effect.
 const CAPTION_PRESETS = [
+    { id: 'visla',   label: 'Visla',      style: 'karaoke', effect: 'box',  highlightColor: '#3B5BFF', baseOpacity: 1.0,  uppercase: false, fontName: 'Liberation Sans', borderWidth: 1 },
     { id: 'tiktok',  label: 'TikTok',     style: 'karaoke', effect: 'none', highlightColor: '#FE2C55', baseOpacity: 0.75, uppercase: false, fontName: 'Verdana', borderWidth: 2 },
     { id: 'reels',   label: 'Reels',      style: 'karaoke', effect: 'none', highlightColor: '#E1306C', baseOpacity: 0.7,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
     { id: 'shorts',  label: 'Shorts Pop', style: 'karaoke', effect: 'pop',  highlightColor: '#FF0000', baseOpacity: 0.7,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
@@ -81,22 +84,22 @@ const swatchClass = (selected) =>
 export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingSubtitle = null, existingHook, bulkCount = 0, bulkProgress }) {
     const [position, setPosition] = useState('bottom');
     const [fontSize, setFontSize] = useState(13);
-    const [fontName, setFontName] = useState('Verdana');
+    const [fontName, setFontName] = useState('Liberation Sans');
     const [fontColor, setFontColor] = useState('#FFFFFF');
-    const [highlightColor, setHighlightColor] = useState('#FFDD00');
+    const [highlightColor, setHighlightColor] = useState('#3B5BFF');
     const [borderColor, setBorderColor] = useState('#000000');
-    const [borderWidth, setBorderWidth] = useState(2);
+    const [borderWidth, setBorderWidth] = useState(1);
     const [bgColor, setBgColor] = useState('#000000');
     const [bgOpacity, setBgOpacity] = useState(0.0);
-    const [animation, setAnimation] = useState('pop');
+    const [animation, setAnimation] = useState('box');
     const [showTextEditor, setShowTextEditor] = useState(false);
 
     // Karaoke (server-side ASS burn) state
-    const [style, setStyle] = useState('classic'); // classic | karaoke
-    const [effect, setEffect] = useState('none'); // none | glow | pop | box
+    const [style, setStyle] = useState('karaoke'); // classic | karaoke
+    const [effect, setEffect] = useState('box'); // none | glow | pop | box
     const [baseOpacity, setBaseOpacity] = useState(1.0);
     const [uppercase, setUppercase] = useState(false);
-    const [activePreset, setActivePreset] = useState(null);
+    const [activePreset, setActivePreset] = useState('visla');
     // Manual sync nudge in seconds (positive = captions later). For transcripts
     // whose word times drift from the audio; applied to burn AND preview.
     const [timeOffset, setTimeOffset] = useState(0);
@@ -206,7 +209,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
             fontColor,
             highlightColor,
             borderColor,
-            borderWidth: borderWidth * 1.5,
+            borderWidth,
             bgColor,
             bgOpacity,
             animation,
@@ -568,6 +571,13 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                                 ? <><Loader2 size={16} className="animate-spin" />applying to all… {bulkProgress.current}/{bulkProgress.total}</>
                                                 : `apply this style to all ${bulkCount} clips`}
                                         </button>
+                                    )}
+                                    {!bulkRunning && (bulkProgress?.errors ?? 0) > 0 && (
+                                        <p className="text-xs text-danger lowercase">{
+                                            bulkProgress.quota
+                                                ? 'quota exceeded: free minutes ran out, top up to finish the rest'
+                                                : `${bulkProgress.errors} of ${bulkProgress.total} failed${bulkProgress.error ? `: ${String(bulkProgress.error).slice(0, 160)}` : ''}`
+                                        }</p>
                                     )}
                                     {/* Clips ship captioned by default, so the way
                                         out has to be here — otherwise a user who

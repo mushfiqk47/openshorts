@@ -21,10 +21,15 @@ RUN pip install --no-cache-dir -r requirements-billing.txt
 
 # GPU build (--build-arg GPU=1): user-space CUDA libs only — the NVIDIA
 # container runtime injects the driver. cuBLAS 12 + cuDNN 9 for CTranslate2
-# (faster-whisper CUDA), onnx-asr + onnxruntime-gpu for Parakeet. Adds ~2GB,
+# (faster-whisper CUDA), onnx-asr + onnxruntime-gpu for Parakeet, plus a CUDA
+# torch build so YOLO/TransNetV2 leave the CPU. Adds ~2GB,
 # so the default CPU image stays slim.
 ARG GPU=0
 RUN if [ "$GPU" = "1" ]; then \
+      pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu126 \
+        "torch==2.11.0" "torchvision==0.26.0" \
+      || pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu126 \
+        torch torchvision; \
       pip install --no-cache-dir \
         "nvidia-cublas-cu12<13" "nvidia-cudnn-cu12>=9,<10" \
         onnx-asr onnxruntime-gpu; \

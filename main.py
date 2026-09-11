@@ -160,13 +160,29 @@ model = YOLO(os.environ.get("YOLO_MODEL_PATH", "yolov8n.pt"))
 # GPU-first: when CUDA is available put YOLO on the GPU (Ultralytics handles
 # device selection per call, but the initial .to() pins weights to VRAM).
 try:
-    _yolo_device = os.environ.get("YOLO_DEVICE", "auto").strip().lower()
-    if _yolo_device == "auto":
+    _yolo_requested = os.environ.get("YOLO_DEVICE", "auto").strip().lower()
+    try:
         import torch as _torch_yolo
-        _yolo_device = "cuda" if _torch_yolo.cuda.is_available() else "cpu"
+        _yolo_cuda_ok = bool(_torch_yolo.cuda.is_available())
+    except Exception:
+        _yolo_cuda_ok = False
+    if _yolo_requested == "auto":
+        _yolo_device = "cuda" if _yolo_cuda_ok else "cpu"
+    elif _yolo_requested in ("cuda", "0", "gpu"):
+        if _yolo_cuda_ok:
+            _yolo_device = "cuda"
+        else:
+            _yolo_device = "cpu"
+            print("[YOLO] YOLO_DEVICE=cuda requested but CUDA is not available "
+                  "(CPU-only torch?) — using CPU")
+    else:
+        _yolo_device = _yolo_requested or "cpu"
     if _yolo_device in ("cuda", "0", "gpu"):
-        model.to("cuda")
-        print("🎯 [YOLO] device: cuda (GPU)")
+        try:
+            model.to("cuda")
+            print("🎯 [YOLO] device: cuda (GPU)")
+        except Exception as _e:
+            print(f"⚠️ [YOLO] GPU init failed ({_e}) — staying on CPU")
     else:
         print(f"🎯 [YOLO] device: {_yolo_device}")
 except Exception as _e:
@@ -753,6 +769,7 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, style_overrid
         if not _subs.generate_ass(
                 transcript, clip_start, clip_end, ass_path,
                 max_chars=style["max_chars"], max_duration=style["max_duration"],
+                max_words=style.get("max_words", 3),
                 alignment=style["alignment"], fontsize=style["font_size"],
                 font_name=style["font_name"], font_color=style["font_color"],
                 border_color=style["border_color"], border_width=style["border_width"],

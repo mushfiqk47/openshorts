@@ -1,6 +1,11 @@
 services:
   backend:
-    build: .
+    build:
+      context: .
+      # GPU image (needs NVIDIA Docker support): GPU_BUILD=1 docker compose build backend.
+      # Default 0 keeps the slim CPU image; the app auto-uses CUDA/NVENC when present.
+      args:
+        GPU: ${GPU_BUILD:-0}
     container_name: openshorts-backend
     ports:
       - "8000:8000"

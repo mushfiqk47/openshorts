@@ -100,7 +100,7 @@ export const subtitleStyleSchema = z.object({
   borderWidth: z.number(),
   bgColor: z.string(),
   bgOpacity: z.number().min(0).max(1),
-  animation: z.enum(["none", "word-highlight", "pop", "karaoke"]),
+  animation: z.enum(["none", "word-highlight", "pop", "karaoke", "box"]),
 });
 
 export const subtitleConfigSchema = z.object({
