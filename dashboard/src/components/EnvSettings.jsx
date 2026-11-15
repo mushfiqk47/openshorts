@@ -162,7 +162,13 @@ function ColabGuide() {
 // Transcription models: drives the nemo-speech runtime (list / download /
 // smoke test). Independent of the AI analysis provider above — this is the
 // ASR (parakeet) side of the pipeline.
+// Free-GPU path for transcription: the Colab notebook below hosts parakeet
+// behind a public tunnel and prints exactly the URL this card asks for.
+// The .ipynb is a static asset in dashboard/public.
+const PARAKEET_NOTEBOOK_URL = `${import.meta.env.BASE_URL}parakeet_asr_colab.ipynb`;
+
 function TranscriptionModels({ asrUrl, onAsrUrlChange }) {
+  const [guideOpen, setGuideOpen] = useState(false);
   const [models, setModels] = useState(null);
   const [active, setActive] = useState('');
   const [job, setJob] = useState(null);
@@ -214,6 +220,33 @@ function TranscriptionModels({ asrUrl, onAsrUrlChange }) {
     <div className="mt-6">
       <h3 className="text-sm font-medium text-ink lowercase">transcription models</h3>
       <p className="text-xs text-muted mb-3">The ASR brain (NeMo-Speech.cpp on CUDA). Download a model here or let the first job pull it automatically; the smoke test proves the whole chain before you upload anything.</p>
+      <div className="border border-rule rounded-card bg-paper3 p-3 mb-3">
+        <div className="flex items-start justify-between gap-3">
+          <p className="text-xs text-muted leading-relaxed">
+            No GPU on this machine? Run <span className="text-ink font-medium">parakeet-tdt-0.6b-v3</span> free on Google Colab — the notebook prints the Colab URL to paste into this card.
+          </p>
+          <a href={PARAKEET_NOTEBOOK_URL} download className="btn-quiet py-1.5 px-3 text-xs shrink-0">
+            <Download size={13} /> Download notebook
+          </a>
+        </div>
+        <button type="button" onClick={() => setGuideOpen(o => !o)} className="mt-2 inline-flex items-center gap-1 text-xs text-brass hover:underline">
+          {guideOpen ? 'Hide setup steps' : 'How to set it up'}
+          <ChevronDown size={12} className={`transition-transform ${guideOpen ? 'rotate-180' : ''}`} />
+        </button>
+        {guideOpen && (
+          <>
+            <ol className="mt-2 space-y-1.5 text-xs text-muted leading-relaxed list-decimal list-inside">
+              <li>Download the notebook, then open it on <a href="https://colab.research.google.com/" target="_blank" rel="noreferrer" className="text-brass hover:underline">Google Colab</a> (File → Upload notebook).</li>
+              <li>Runtime → Change runtime type → <span className="text-ink2">T4 GPU</span>, then Run all (~7 min: downloads the prebuilt runtime + the 714 MB model, starts the server and a Cloudflare tunnel).</li>
+              <li>The output prints a <span className="text-ink2">Colab URL</span> (<code className="font-mono">https://….trycloudflare.com</code>) — copy it.</li>
+              <li>Paste it into the Google Colab URL field below and hit <span className="text-ink2">test transcription</span> — it should report backend CUDA.</li>
+            </ol>
+            <p className="mt-2 text-[11px] text-muted/80 leading-relaxed">
+              Free Colab disconnects after ~12h and every re-run gets a new URL — update the field when that happens. Empty the field to go back to the local GPU.
+            </p>
+          </>
+        )}
+      </div>
       <label className="block mb-3">
         <span className="text-xs text-ink2 font-medium">Google Colab URL <span className="font-mono text-[11px] text-muted/70">NEMO_ASR_URL</span></span>
         <input
