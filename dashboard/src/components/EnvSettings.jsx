@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Save, RefreshCw, Check, AlertTriangle, Eye, EyeOff, Copy, Download, ChevronDown, PlugZap } from 'lucide-react';
+import { Save, RefreshCw, Check, AlertTriangle, Eye, EyeOff, Copy, Download, ChevronDown, PlugZap, Cpu, Cloud } from 'lucide-react';
 import { getApiUrl } from '../config';
+import SegmentedControl from './ui/SegmentedControl';
 
 // GPU / Pipeline keys render as a generic grid below the AI provider section.
 const GROUPS = [
@@ -169,6 +170,7 @@ const PARAKEET_NOTEBOOK_URL = `${import.meta.env.BASE_URL}parakeet_asr_colab.ipy
 
 function TranscriptionModels({ asrUrl, onAsrUrlChange }) {
   const [guideOpen, setGuideOpen] = useState(false);
+  const [mode, setMode] = useState(asrUrl ? 'cloud' : 'local');
   const [models, setModels] = useState(null);
   const [active, setActive] = useState('');
   const [job, setJob] = useState(null);
@@ -200,6 +202,43 @@ function TranscriptionModels({ asrUrl, onAsrUrlChange }) {
     return () => clearInterval(timer);
   }, []);
 
+  // Follow external changes (env reload, save) so the toggle never lies.
+  useEffect(() => { setMode(asrUrl ? 'cloud' : 'local'); }, [asrUrl]);
+
+  const rememberUrl = (url) => {
+    try {
+      if (url) localStorage.setItem('os_colab_asr_url', url);
+    } catch { /* ignore */ }
+  };
+
+  // The toggle applies live through the env API: jobs pick the mode up
+  // immediately, no restart, and .env keeps it across restarts.
+  const switchMode = async (next) => {
+    setErr(null);
+    let url = '';
+    if (next === 'cloud') {
+      try { url = localStorage.getItem('os_colab_asr_url') || ''; } catch { url = ''; }
+      url = url || asrUrl || '';
+    }
+    try {
+      const res = await fetch(getApiUrl('/api/env'), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ updates: { NEMO_ASR_URL: url } }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      if (url) rememberUrl(url);
+      onAsrUrlChange(url);
+      setMode(next);
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+
+  const editUrl = (url) => {
+    onAsrUrlChange(url);
+    rememberUrl(url);
+  };
+
   const act = async (path, body) => {
     setErr(null);
     try {
@@ -215,100 +254,116 @@ function TranscriptionModels({ asrUrl, onAsrUrlChange }) {
   };
 
   const running = job?.running;
+  const isCloud = mode === 'cloud';
 
   return (
     <div className="mt-6">
       <h3 className="text-sm font-medium text-ink lowercase">transcription models</h3>
-      <p className="text-xs text-muted mb-3">The ASR brain (NeMo-Speech.cpp on CUDA). Download a model here or let the first job pull it automatically; the smoke test proves the whole chain before you upload anything.</p>
-      <div className="border border-rule rounded-card bg-paper3 p-3 mb-3">
-        <div className="flex items-start justify-between gap-3">
-          <p className="text-xs text-muted leading-relaxed">
-            No GPU on this machine? Run <span className="text-ink font-medium">parakeet-tdt-0.6b-v3</span> free on Google Colab — the notebook prints the Colab URL to paste into this card.
-          </p>
-          <a href={PARAKEET_NOTEBOOK_URL} download className="btn-quiet py-1.5 px-3 text-xs shrink-0">
-            <Download size={13} /> Download notebook
-          </a>
-        </div>
-        <button type="button" onClick={() => setGuideOpen(o => !o)} className="mt-2 inline-flex items-center gap-1 text-xs text-brass hover:underline">
-          {guideOpen ? 'Hide setup steps' : 'How to set it up'}
-          <ChevronDown size={12} className={`transition-transform ${guideOpen ? 'rotate-180' : ''}`} />
-        </button>
-        {guideOpen && (
-          <>
-            <ol className="mt-2 space-y-1.5 text-xs text-muted leading-relaxed list-decimal list-inside">
-              <li>Download the notebook, then open it on <a href="https://colab.research.google.com/" target="_blank" rel="noreferrer" className="text-brass hover:underline">Google Colab</a> (File → Upload notebook).</li>
-              <li>Runtime → Change runtime type → <span className="text-ink2">T4 GPU</span>, then Run all (~7 min: downloads the prebuilt runtime + the 714 MB model, starts the server and a Cloudflare tunnel).</li>
-              <li>The output prints a <span className="text-ink2">Colab URL</span> (<code className="font-mono">https://….trycloudflare.com</code>) — copy it.</li>
-              <li>Paste it into the Google Colab URL field below and hit <span className="text-ink2">test transcription</span> — it should report backend CUDA.</li>
-            </ol>
-            <p className="mt-2 text-[11px] text-muted/80 leading-relaxed">
-              Free Colab disconnects after ~12h and every re-run gets a new URL — update the field when that happens. Empty the field to go back to the local GPU.
-            </p>
-          </>
-        )}
-      </div>
-      <label className="block mb-3">
-        <span className="text-xs text-ink2 font-medium">Google Colab URL <span className="font-mono text-[11px] text-muted/70">NEMO_ASR_URL</span></span>
-        <input
-          type="text"
-          value={asrUrl}
-          onChange={(e) => onAsrUrlChange(e.target.value)}
-          placeholder="https://...trycloudflare.com (empty = use the local GPU)"
-          className="input-field mt-1.5 font-mono text-sm"
+      <p className="text-xs text-muted mb-3">
+        {isCloud
+          ? 'Remote mode: the ASR brain (parakeet on a Colab T4) answers over the tunnel. The model list below is the local fallback.'
+          : 'Local mode: the ASR brain (NeMo-Speech.cpp) runs on this CUDA GPU. The smoke test proves the whole chain before you upload anything.'}
+      </p>
+      <div className="max-w-md mb-3">
+        <SegmentedControl
+          options={[
+            { value: 'local', label: 'local gpu', icon: Cpu, hint: 'this machine' },
+            { value: 'cloud', label: 'colab cloud', icon: Cloud, hint: 'free T4' },
+          ]}
+          value={mode}
+          onChange={switchMode}
         />
-        <span className="text-xs text-muted mt-1 block">
-          {asrUrl
-            ? <>Remote mode: transcription goes to this Colab server, the local GPU stays idle. Hit <span className="text-ink2">test transcription</span> to verify it.</>
-            : 'Local mode: transcription runs on the CUDA GPU of this machine.'}
-        </span>
-      </label>
+      </div>
       {err && <p className="text-xs text-warn mb-2">{err}</p>}
-      {!models ? (
-        <p className="text-xs text-muted flex items-center gap-2"><RefreshCw size={12} className="animate-spin" /> reading the runtime…</p>
-      ) : (
-        <div className="border border-rule rounded-card bg-paper2 p-4 space-y-2">
-          {models.map(m => {
-            const isActive = active === m.alias || (m.aliases || []).includes(active);
-            return (
-              <div key={m.alias} className={`flex items-center justify-between gap-3 p-2 rounded-input ${isActive ? 'bg-paper3' : ''}`}>
-                <div className="min-w-0">
-                  <span className="text-sm text-ink font-mono">{m.alias}</span>
-                  {isActive && <span className="readout ml-2">active</span>}
-                  <span className={`ml-2 text-[11px] ${m.cached ? 'text-ok' : 'text-muted'}`}>{m.cached ? '• downloaded' : '• not downloaded'}</span>
-                </div>
-                <button
-                  onClick={() => act('/api/asr/download', { model: m.alias })}
-                  disabled={running || m.cached}
-                  className="btn-quiet py-1.5 px-3 text-xs disabled:opacity-50 shrink-0"
-                  title={m.cached ? 'Already downloaded' : 'Download from Hugging Face (sha256 verified)'}
-                >
-                  {m.cached ? 'downloaded' : 'download'}
-                </button>
-              </div>
-            );
-          })}
-          <div className="pt-2 border-t border-rule flex items-center justify-between gap-3">
-            <span className="text-xs text-muted">
-              {running
-                ? `working: ${job?.model || 'smoke test'}…`
-                : job?.ok === true
-                  ? 'last check passed'
-                  : job?.ok === false
-                    ? <span className="text-warn">last check failed: {String(job?.detail || '').slice(0, 120)}</span>
-                    : 'run the smoke test to verify the GPU chain'}
-            </span>
-            <button onClick={() => act('/api/asr/smoke-test')} disabled={running} className="btn-primary py-1.5 px-3 text-xs disabled:opacity-50 shrink-0">
-              {running ? 'working…' : 'test transcription'}
-            </button>
+
+      {isCloud && (
+        <div className="border border-rule rounded-card bg-paper3 p-3 mb-3">
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-xs text-muted leading-relaxed">
+              Colab server offline? Run <span className="text-ink font-medium">parakeet-tdt-0.6b-v3</span> free on Google Colab — the notebook prints the Colab URL to paste here.
+            </p>
+            <a href={PARAKEET_NOTEBOOK_URL} download className="btn-quiet py-1.5 px-3 text-xs shrink-0">
+              <Download size={13} /> Download notebook
+            </a>
           </div>
-          {job?.detail && !running && job?.ok === true && (
-            <p className="text-[11px] font-mono text-muted break-all">{String(job.detail).slice(0, 200)}</p>
+          <button type="button" onClick={() => setGuideOpen(o => !o)} className="mt-2 inline-flex items-center gap-1 text-xs text-brass hover:underline">
+            {guideOpen ? 'Hide setup steps' : 'How to set it up'}
+            <ChevronDown size={12} className={`transition-transform ${guideOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {guideOpen && (
+            <>
+              <ol className="mt-2 space-y-1.5 text-xs text-muted leading-relaxed list-decimal list-inside">
+                <li>Download the notebook, then open it on <a href="https://colab.research.google.com/" target="_blank" rel="noreferrer" className="text-brass hover:underline">Google Colab</a> (File → Upload notebook).</li>
+                <li>Runtime → Change runtime type → <span className="text-ink2">T4 GPU</span>, then Run all (~7 min: downloads the prebuilt runtime + the 714 MB model, starts the server and a Cloudflare tunnel).</li>
+                <li>The output prints a <span className="text-ink2">Colab URL</span> (<code className="font-mono">https://….trycloudflare.com</code>) — copy it.</li>
+                <li>Paste it into the field below and hit <span className="text-ink2">test transcription</span> — it should report backend CUDA.</li>
+              </ol>
+              <p className="mt-2 text-[11px] text-muted/80 leading-relaxed">
+                Free Colab disconnects after ~12h and every re-run gets a new URL — update the field when that happens.
+              </p>
+            </>
           )}
+          <label className="block mt-3">
+            <span className="text-xs text-ink2 font-medium">Google Colab URL <span className="font-mono text-[11px] text-muted/70">NEMO_ASR_URL</span></span>
+            <input
+              type="text"
+              value={asrUrl}
+              onChange={(e) => editUrl(e.target.value)}
+              placeholder="https://...trycloudflare.com"
+              className="input-field mt-1.5 font-mono text-sm"
+            />
+          </label>
         </div>
       )}
+
+      <div className="border border-rule rounded-card bg-paper2 p-4 space-y-2">
+        <p className="text-xs text-muted">
+          {isCloud
+            ? 'Model downloads serve the local fallback — switch the toggle to local GPU to use them.'
+            : 'Active model below; jobs pull any non-downloaded model automatically.'}
+        </p>
+        {models.map(m => {
+          const isActive = active === m.alias || (m.aliases || []).includes(active);
+          return (
+            <div key={m.alias} className={`flex items-center justify-between gap-3 p-2 rounded-input ${isActive ? 'bg-paper3' : ''}`}>
+              <div className="min-w-0">
+                <span className="text-sm text-ink font-mono">{m.alias}</span>
+                {isActive && <span className="readout ml-2">active</span>}
+                <span className={`ml-2 text-[11px] ${m.cached ? 'text-ok' : 'text-muted'}`}>{m.cached ? '• downloaded' : '• not downloaded'}</span>
+              </div>
+              <button
+                onClick={() => act('/api/asr/download', { model: m.alias })}
+                disabled={running || m.cached}
+                className="btn-quiet py-1.5 px-3 text-xs disabled:opacity-50 shrink-0"
+                title={m.cached ? 'Already downloaded' : 'Download from Hugging Face (sha256 verified)'}
+              >
+                {m.cached ? 'downloaded' : 'download'}
+              </button>
+            </div>
+          );
+        })}
+        <div className="pt-2 border-t border-rule flex items-center justify-between gap-3">
+          <span className="text-xs text-muted">
+            {running
+              ? 'working…'
+              : job?.ok === true
+                ? 'last check passed'
+                : job?.ok === false
+                  ? <span className="text-warn">last check failed: {String(job?.detail || '').slice(0, 120)}</span>
+                  : `run the smoke test to verify the ${isCloud ? 'Colab' : 'local GPU'} chain`}
+          </span>
+          <button onClick={() => act('/api/asr/smoke-test')} disabled={running} className="btn-primary py-1.5 px-3 text-xs disabled:opacity-50 shrink-0">
+            {running ? 'working…' : isCloud ? 'test colab' : 'test local gpu'}
+          </button>
+        </div>
+        {job?.detail && !running && job?.ok === true && (
+          <p className="text-[11px] font-mono text-muted break-all">{String(job.detail).slice(0, 200)}</p>
+        )}
+      </div>
     </div>
-  );
+  )
 }
+
 
 export default function EnvSettings() {
   const [env, setEnv] = useState(null);
