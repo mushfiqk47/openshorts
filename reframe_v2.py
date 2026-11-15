@@ -234,7 +234,7 @@ def _analyze_trajectory(input_video, scenes_boundaries, scene_strategies,
     """Replays v1's per-frame decision loop on a downscaled ffmpeg-decoded
     stream. Returns xs: crop x per frame (None on GENERAL frames)."""
     import numpy as np
-    import main as m
+    import tracking as m
 
     small_w = min(ANALYSIS_MAX_WIDTH, orig_w)
     if small_w % 2:
@@ -331,13 +331,13 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
     the ones the tracker got right. Applied AFTER force_strategy: a per-scene
     hand position always beats the whole-clip choice for the scenes it names.
     """
-    import main as m
+    import tracking as m
     content_ranges = content_ranges or []
 
     print("   🚀 Reframe engine v2 (ffmpeg-native render)")
-    scenes, fps = m.detect_scenes(input_video)
+    scenes, fps = scene_detection.detect_scenes(input_video)
     fps = float(fps)  # PySceneDetect can hand back a Fraction
-    orig_w, orig_h = m.get_video_resolution(input_video)
+    orig_w, orig_h = ffmpeg_utils.get_video_resolution(input_video)
 
     out_w, out_h = delivery_size(orig_w, orig_h, aspect_ratio)
 
@@ -355,7 +355,7 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
         content_ranges = []  # no screencast/inset upgrades over an explicit choice
         print(f"   🎯 Framing override: every scene -> {force_strategy}")
     else:
-        strategies = m.analyze_scenes_strategy(input_video, scenes)
+        strategies = scene_detection.analyze_scenes_strategy(input_video, scenes)
 
     # SPLIT is an upgrade applied on top of the TRACK/GENERAL verdict, keyed by
     # the scene's START FRAME rather than its index: scene_frame_ranges() drops

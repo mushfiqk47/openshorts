@@ -18,6 +18,8 @@ import subprocess
 import sys
 import threading
 
+import cv2
+
 # Windows cp1252 can't encode the encoder emoji; force utf-8 for prints
 try:
     if hasattr(sys.stdout, "reconfigure"):
@@ -220,3 +222,13 @@ def video_encode_args(tier=QUALITY):
               f"(FFMPEG_ENCODER={mode})")
 
     return list((_NVENC_ARGS if use_nvenc else _X264_ARGS)[tier])
+
+def get_video_resolution(video_path):
+    probe = cv2.VideoCapture(video_path)
+    try:
+        if not probe.isOpened():
+            raise IOError(f"cannot open video: {video_path}")
+        return (int(probe.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(probe.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    finally:
+        probe.release()
