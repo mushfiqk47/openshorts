@@ -1,5 +1,9 @@
 """
-OpenRouter client for OpenShorts — drop-in alternative to Gemini for clip selection.
+OpenRouter provider — drop-in alternative to Gemini for clip selection.
+
+(Moved verbatim from the former root openrouter_client.py: the free-model
+fallback list, the 404/429 rotation and the auth-error surfacing are tuned
+behavior — do not "simplify" them.
 
 Uses the OpenAI-compatible API at https://openrouter.ai/api/v1 with the
 `openai` Python library (already installed). Supports any model on OpenRouter;

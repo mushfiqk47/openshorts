@@ -248,7 +248,7 @@ async def test_ai_connection(body: AITestBody):
         if provider in ("openrouter", "auto"):
             key = cfg("OPENROUTER_API_KEY")
             if key:
-                from openrouter_client import OPENROUTER_BASE
+                from ai.openrouter import OPENROUTER_BASE
                 return ping(OPENROUTER_BASE, key, cfg("OPENROUTER_MODEL") or "openrouter/free")
             if provider == "openrouter":
                 return {"ok": False, "provider": provider, "error": "OPENROUTER_API_KEY is not set"}

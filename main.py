@@ -45,38 +45,6 @@ import json
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
 
-# OpenRouter (free model) path — optional, used when OPENROUTER_API_KEY is set
-try:
-    import openrouter_client  # noqa: F401
-    _HAS_OPENROUTER = True
-except ImportError:
-    _HAS_OPENROUTER = False
-
-
-def _use_openrouter() -> bool:
-    """True when an OpenRouter key is configured (env or mirrored from request)."""
-    k = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or "").strip()
-    if k:
-        return True
-    # Also accept a GEMINI_API_KEY that looks like an OpenRouter key (dashboard single field)
-    g = (os.environ.get("GEMINI_API_KEY") or "").strip()
-    return g.startswith("sk-or-v1-") or g.startswith("sk-or-")
-
-
-def _openrouter_key() -> str:
-    k = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or "").strip()
-    if k:
-        return k
-    return (os.environ.get("GEMINI_API_KEY") or "").strip()
-
-
-def _openrouter_model() -> str:
-    return (
-        os.environ.get("OPENROUTER_MODEL")
-        or os.environ.get("GEMINI_MODEL")
-        or "openrouter/free"
-    ).strip() or "openrouter/free"
-
 # Load environment variables
 load_dotenv()
 
@@ -931,81 +899,11 @@ def transcribe_video(video_path):
 
     return transcript
 
-def _run_gemini_stage(client, model_name, prompt, schema):
-    """One schema-enforced Gemini call with transient-error backoff.
-    Returns (parsed_dict, cost_analysis)."""
-    if genai_types is None or client is None:
-        raise RuntimeError("google-genai not installed — install google-genai or use OpenRouter")
-    config = genai_types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=schema,
-    )
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = client.models.generate_content(model=model_name, contents=prompt, config=config)
-            # Policy blocks are deterministic — retrying only burns quota and
-            # time, and the user deserves the real reason instead of a generic
-            # "empty response" (prod 23-jul: PROHIBITED_CONTENT on every try).
-            gemini_worker.raise_if_blocked(response)
-            # Parsing lives inside the retry loop on purpose: Gemini sometimes
-            # returns 200 with an empty body, which raises here rather than at
-            # the call. Retrying that recovered every occurrence seen in prod
-            # (22-jul-2026) — the same payload succeeds on the next attempt.
-            parsed_obj = getattr(response, "parsed", None)
-            if parsed_obj is not None:
-                parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
-            else:
-                parsed = gemini_worker._parse_json_response_text(
-                    gemini_worker._get_response_text(response))
-            return parsed, gemini_worker._calculate_cost_analysis(response, model_name)
-        except gemini_worker.GeminiBlockedError:
-            raise  # deterministic policy block — never retry
-        except Exception as e:
-            msg = str(e)
-            transient = any(tok in msg for tok in (
-                '503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED',
-                '500', 'INTERNAL', 'overloaded', 'Deadline',
-                'empty response body', 'did not contain a JSON object',
-                'Failed to parse Gemini JSON response'))
-            if attempt == max_attempts or not transient:
-                raise
-            wait = 5 * (2 ** (attempt - 1))
-            print(f"⚠️ Gemini transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
-            time.sleep(wait)
-
-
-def _ai_provider() -> str:
-    """Which service runs the clip-selection stages: custom | ollama |
-    openrouter | gemini. AI_PROVIDER pins the choice explicitly; 'auto'
-    resolves to OpenRouter when a key is configured (env or mirrored from
-    request), else Gemini. 'custom' needs AI_BASE_URL + AI_MODEL and can point
-    at any OpenAI-compatible endpoint (tunnel, vLLM, llama.cpp server).
-    """
-    p = (os.environ.get("AI_PROVIDER") or "").strip().lower()
-    if p in ("custom", "ollama", "openrouter", "gemini"):
-        return p
-    return "openrouter" if _use_openrouter() else "gemini"
-
-
-def _run_ai_stage(prompt: str, mode: str) -> tuple[dict, dict | None]:
-    """One AI call — score or detail — returning (parsed, cost)."""
-    # score = precise (0.2), detail = creative (0.7)
-    temp = 0.2 if mode == "score" else 0.7
-    if _ai_provider() == "custom":
-        import custom_client
-        return custom_client.call_custom(prompt, temperature=temp)
-    if _ai_provider() == "ollama":
-        import ollama_client
-        return ollama_client.call_ollama(prompt, temperature=temp)
-    import openrouter_client
-
-    key = _openrouter_key()
-    model = _openrouter_model()
-    if not key:
-        raise RuntimeError("OPENROUTER_API_KEY not set")
-    parsed, cost = openrouter_client.call_openrouter(prompt, api_key=key, model=model, temperature=temp)
-    return parsed, cost
+# The provider dispatch + Gemini stage live in the ai/ package; the bare
+# names are re-imported so every call site (and test_gemini_retry) is
+# unchanged.
+from ai.dispatch import _use_openrouter, _openrouter_key, _openrouter_model, _ai_provider, _run_ai_stage  # noqa: E402,F401
+from ai.gemini import _run_gemini_stage  # noqa: E402,F401
 
 
 def get_viral_clips(transcript_result, video_duration):
@@ -1025,15 +923,15 @@ def get_viral_clips(transcript_result, video_duration):
     use_or = provider_kind == "openrouter"
     client = None
     if provider_kind == "custom":
-        import custom_client
+        from ai import custom
         api_key = None
-        model_name = custom_client.ai_model()
+        model_name = custom.ai_model()
         provider = f"custom ({model_name})"
-        print(f"🤖 Using custom endpoint {custom_client.ai_base_url()} — set AI_MODEL to change it.")
+        print(f"🤖 Using custom endpoint {custom.ai_base_url()} — set AI_MODEL to change it.")
     elif provider_kind == "ollama":
-        import ollama_client
+        from ai import ollama
         api_key = None
-        model_name = ollama_client.ollama_model()
+        model_name = ollama.ollama_model()
         provider = f"Ollama {model_name}"
         print(f"🤖 Using Ollama (local) — set OLLAMA_MODEL to change it.")
     elif use_or:

@@ -59,7 +59,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 |------|---------|
 | `main.py` | Core video processing: transcription, scene detection, clip extraction, vertical reframing |
 | `transcribe_backends.py` | ASR: NeMo-Speech.cpp (parakeet-tdt-0.6b-v3 GGUF) on CUDA, GPU-only by design |
-| `ollama_client.py` / `custom_client.py` | Local-model and any-OpenAI-compatible analysis providers (AI_PROVIDER=ollama/custom) |
+| `ai/` | Provider adapters behind the dispatch seam: `ai/dispatch.py` (_ai_provider/_run_ai_stage), `ai/gemini.py` (schema-enforced stage), `ai/openai_compat.py` (shared transport), `ai/custom.py`, `ai/ollama.py`, `ai/openrouter.py` (free-model rotation) |
 | `env_manager.py` | .env sync with live-apply; the dashboard Settings panel writes through it |
 | `app.py` | ASGI entrypoint: assembles the FastAPI app from the `server/` package (~110 lines) |
 | `server/state.py` | Shared state: dirs, config constants, cloud-billing gate, job tables, live knobs |
@@ -255,10 +255,11 @@ bug that already shipped once.
    session line lacks `backend=CUDA`. Never add a CPU fallback for ASR. The
    failure paths (NoAudioError, missing file, cut failure) must stay explicit
    and actionable.
-2. **AI provider dispatch goes through `_ai_provider()` in main.py**: custom
-   (any OpenAI-compatible endpoint via AI_BASE_URL/AI_API_KEY/AI_MODEL),
-   ollama, openrouter, gemini. New providers plug into `_run_ai_stage` only —
-   stage call sites must not import client modules directly.
+2. **AI provider dispatch goes through `ai/dispatch.py`** (`_ai_provider()`,
+   re-exported from main.py for back-compat): custom (any OpenAI-compatible
+   endpoint via AI_BASE_URL/AI_API_KEY/AI_MODEL), ollama, openrouter, gemini.
+   New providers plug into `ai/_run_ai_stage` only — stage call sites must
+   not import a provider adapter directly.
 3. **Reasoning models break forced JSON mode.** With `response_format:
    {"type":"json_object"}`, reasoning models (lfm3-vl, mimo-v2.6-heretic)
    spend their whole budget thinking in the hidden reasoning field and return

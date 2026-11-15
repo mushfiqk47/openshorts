@@ -185,7 +185,9 @@ the surface IS the product.
 ## Functional contract (NEVER break)
 
 Hash routing (`#app`, `#/pricing`, `#/account`, `#legal`; old `#landing` and
-section anchors resolve to the app), `billingEnabled` /
+section anchors resolve to the app; app tabs sync to `#/dashboard`,
+`#/ai-agent`, `#/history`, `#/settings` via App.jsx `switchTab` so the
+browser Back button returns to the previous tab instead of exiting), `billingEnabled` /
 `isManaged` / `isSignedIn` gating, all handlers and props, localStorage keys
 (`gemini_key`, `uploadPostKey_v3`, `elevenLabsKey_v1`, `falKey_v1`,
 `uploadUserId`, `openshorts_session`, `openshorts_auth`), API calls and BYOK
