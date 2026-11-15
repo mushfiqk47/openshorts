@@ -3,7 +3,6 @@ and /api/translate."""
 import os
 import re
 import glob
-import json
 import time
 import asyncio
 from typing import List, Optional
@@ -14,13 +13,18 @@ from pydantic import BaseModel
 from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_from_video
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
-import recut
 
 from server import state
 from server.state import jobs, _metering, _cloud_config
 from server.billing import require_managed_entitlement, _assert_job_owner
 from server.jobs import _reapply_captions, _archive_clip_edit_bg, _strip_burned_captions, _strip_burned_hook
 from server.routes.process import _ensure_job_files
+from core.artifacts import (  # noqa: E402
+    clip_window,
+    load_metadata,
+    metadata_base_name,
+    save_metadata,
+)
 
 router = APIRouter()
 
@@ -67,13 +71,12 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
     # We need to access metadata.json to get the transcript
     output_dir = os.path.join(state.OUTPUT_DIR, req.job_id)
     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
-    
+
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
-        
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
-        
+
+    data = load_metadata(json_files[0])
+    
     transcript = data.get('transcript')
     if not transcript:
         raise HTTPException(status_code=400, detail="Transcript not found in metadata. Please process a new video.")
@@ -84,17 +87,9 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         
     clip_data = clips[req.clip_index]
 
-    # Recut clips concatenate several source segments, so their caption window
-    # is not the flat start..end range — restyle against the clip-relative
-    # remapped transcript instead.
-    recipe_segments = (clip_data.get('recipe') or {}).get('segments')
-    if recipe_segments:
-        sub_transcript = recut.virtual_transcript(transcript, recipe_segments)
-        sub_start, sub_end = 0.0, recut.total_duration(recipe_segments)
-    else:
-        sub_transcript = transcript
-        sub_start = clip_data.get('start', 0)
-        sub_end = clip_data.get('end', 0)
+    # Recut clips concatenate several source segments, so clip_window restyles
+    # against the clip-relative remapped transcript instead of the flat range.
+    sub_transcript, sub_start, sub_end = clip_window(transcript, clip_data)
 
     # User-edited captions win over both: build a synthetic clip-relative
     # transcript from them so the SRT/ASS generators burn the edited words
@@ -130,7 +125,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         # Fallback to standard naming
         filename = clip_data.get('video_url', '').split('/')[-1]
         if not filename:
-             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+             base_name = metadata_base_name(json_files[0])
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
 
     # Re-subtitling must replace previous subtitles instead of burning over them.
@@ -234,9 +229,8 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
             data['shorts'] = clips
             
             # Write back
-            with open(json_files[0], 'w') as f:
-                json.dump(data, f, indent=4)
-                print(f"✅ Metadata updated with subtitled video for clip {req.clip_index}")
+            save_metadata(json_files[0], data)
+            print(f"✅ Metadata updated with subtitled video for clip {req.clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
         # Non-critical, but good for persistence
@@ -274,8 +268,7 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
+    data = load_metadata(json_files[0])
     clips = data.get('shorts', [])
     if req.clip_index >= len(clips):
         raise HTTPException(status_code=404, detail="Clip not found")
@@ -283,7 +276,7 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
     filename = os.path.basename(
         req.input_filename
         or (clips[req.clip_index].get('video_url') or '').split('/')[-1]
-        or f"{os.path.basename(json_files[0]).replace('_metadata.json', '')}"
+        or f"{metadata_base_name(json_files[0])}"
            f"_clip_{req.clip_index + 1}.mp4")
 
     # Same walk-back the burn path uses, so this undoes any number of restyles.
@@ -303,8 +296,7 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
     try:
         clips[req.clip_index]['video_url'] = new_url
         data['shorts'] = clips
-        with open(json_files[0], 'w') as f:
-            json.dump(data, f, indent=4)
+        save_metadata(json_files[0], data)
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
 
@@ -334,13 +326,12 @@ async def add_hook(req: HookRequest, request: Request):
     await _assert_job_owner(request, job)
     output_dir = os.path.join(state.OUTPUT_DIR, req.job_id)
     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
-    
+
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
-        
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
-        
+
+    data = load_metadata(json_files[0])
+    
     clips = data.get('shorts', [])
     if req.clip_index >= len(clips):
         raise HTTPException(status_code=404, detail="Clip not found")
@@ -353,7 +344,7 @@ async def add_hook(req: HookRequest, request: Request):
     else:
         filename = clip_data.get('video_url', '').split('/')[-1]
         if not filename:
-             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+             base_name = metadata_base_name(json_files[0])
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
          
     input_path = os.path.join(output_dir, filename)
@@ -442,9 +433,8 @@ async def add_hook(req: HookRequest, request: Request):
         if req.clip_index < len(clips):
             clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
             data['shorts'] = clips
-            with open(json_files[0], 'w') as f:
-                json.dump(data, f, indent=4)
-                print(f"✅ Metadata updated with hook video for clip {req.clip_index}")
+            save_metadata(json_files[0], data)
+            print(f"✅ Metadata updated with hook video for clip {req.clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
 
@@ -490,8 +480,7 @@ async def translate_clip(
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
 
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
+    data = load_metadata(json_files[0])
 
     clips = data.get('shorts', [])
     if req.clip_index >= len(clips):
@@ -505,7 +494,7 @@ async def translate_clip(
     else:
         filename = clip_data.get('video_url', '').split('/')[-1]
         if not filename:
-             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+             base_name = metadata_base_name(json_files[0])
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
 
     input_path = os.path.join(output_dir, filename)
@@ -544,9 +533,8 @@ async def translate_clip(
         if req.clip_index < len(clips):
             clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
             data['shorts'] = clips
-            with open(json_files[0], 'w') as f:
-                json.dump(data, f, indent=4)
-                print(f"✅ Metadata updated with translated video for clip {req.clip_index}")
+            save_metadata(json_files[0], data)
+            print(f"✅ Metadata updated with translated video for clip {req.clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
 

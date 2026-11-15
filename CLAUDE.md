@@ -61,7 +61,11 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `transcribe_backends.py` | ASR: NeMo-Speech.cpp (parakeet-tdt-0.6b-v3 GGUF) on CUDA, GPU-only by design |
 | `ollama_client.py` / `custom_client.py` | Local-model and any-OpenAI-compatible analysis providers (AI_PROVIDER=ollama/custom) |
 | `env_manager.py` | .env sync with live-apply; the dashboard Settings panel writes through it |
-| `app.py` | FastAPI server with async job queue and REST endpoints |
+| `app.py` | ASGI entrypoint: assembles the FastAPI app from the `server/` package (~110 lines) |
+| `server/state.py` | Shared state: dirs, config constants, cloud-billing gate, job tables, live knobs |
+| `server/billing.py` | Per-request key resolution, metering reservations, tenant ownership guards |
+| `server/jobs.py` | Job engine: queue worker, subprocess runner, artifact surgery, recovery/resume, webhooks |
+| `server/routes/` | Route families as APIRouters: system, process, clips, captions, social, thumbnails, saasshorts (parked behind `SAASSHORTS=1`) |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
 | `hooks.py` | Hook text overlay generation with font rendering |
 | `s3_uploader.py` | AWS S3 upload with caching |

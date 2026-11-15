@@ -18,6 +18,14 @@ import recut
 from s3_uploader import upload_job_artifacts
 
 from server import state
+from core.artifacts import (  # noqa: E402
+    canonical_clip_file as _canonical_clip_file,
+    strip_burned_captions as _strip_burned_captions,
+    strip_burned_hook as _strip_burned_hook,
+    clip_window,
+    load_metadata,
+    metadata_base_name,
+)
 from server.state import (
     job_queue,
     jobs,
@@ -51,7 +59,7 @@ def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
 
         # Move the newest metadata and its associated clips.
         metadata_path = meta_candidates[0]
-        base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+        base_name = metadata_base_name(metadata_path)
 
         # Move metadata
         dest_metadata = os.path.join(job_output_dir, os.path.basename(metadata_path))
@@ -76,62 +84,6 @@ def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     except Exception:
         return False
 
-def _canonical_clip_file(output_dir, base_name, index):
-    """The file to serve for clip ``index``, preferring a derived version.
-
-    The pipeline writes the clean reframe as ``<base>_clip_<n>.mp4`` and any
-    post-processing (auto-captions, /api/subtitle re-styles, and clip-editor
-    recuts) as ``subtitled_<ts>_<clean>.mp4`` / ``recut_<ts>_<clean>.mp4``,
-    keeping the original for re-styling. Every place that rebuilds the
-    canonical name from disk — restore after a restart, the R2 upload, the
-    download bundle — must therefore resolve to the newest derived file, or
-    clips silently lose their captions (or their recut) on a redeploy.
-    """
-    clean = f"{base_name}_clip_{index + 1}.mp4"
-    try:
-        # subtitled_*_{clean} also matches subtitled_<ts>_recut_<ts>_{clean}
-        # and subtitled_<ts>_hooked_<ts>_{clean}, i.e. captioned recuts and
-        # captioned hooks; the bare recut_/hooked_/hook_ patterns cover
-        # derivations that shipped uncaptioned (hook_ is the legacy manual-
-        # hook prefix, kept so old jobs still resolve).
-        derived = (glob.glob(os.path.join(output_dir, f"subtitled_*_{clean}"))
-                   + glob.glob(os.path.join(output_dir, f"recut_*_{clean}"))
-                   + glob.glob(os.path.join(output_dir, f"hooked_*_{clean}"))
-                   + glob.glob(os.path.join(output_dir, f"hook_{clean}")))
-    except Exception:
-        derived = []
-    if not derived:
-        return clean
-    # Highest timestamp wins — that's the most recent styling.
-    return os.path.basename(max(derived, key=os.path.getmtime))
-
-
-def _strip_burned_captions(output_dir, filename):
-    """Walk ``subtitled_<ts>_`` prefixes back to the file without burned captions.
-
-    Returns the name unchanged when there is nothing to strip (or when the
-    underlying file is gone, e.g. a library restore that only kept the current
-    version).
-    """
-    while True:
-        m = re.match(r'^subtitled_\d+_(.+)$', filename)
-        if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
-            return filename
-        filename = m.group(1)
-
-
-def _strip_burned_hook(output_dir, filename):
-    """Walk ``hooked_<ts>_`` (and legacy ``hook_``) prefixes back to the file
-    without a burned hook. Same fail-safe contract as _strip_burned_captions:
-    the name is returned unchanged when there is nothing to strip or the
-    underlying file is gone."""
-    while True:
-        m = re.match(r'^(?:hooked_\d+_|hook_)(.+)$', filename)
-        if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
-            return filename
-        filename = m.group(1)
-
-
 def _reapply_captions(job_id, clip_index, video_path):
     """Re-burn the default captions onto a freshly derived file.
 
@@ -147,25 +99,17 @@ def _reapply_captions(job_id, clip_index, video_path):
         meta_files = glob.glob(os.path.join(state.OUTPUT_DIR, job_id, "*_metadata.json"))
         if not meta_files:
             return None
-        with open(meta_files[0], 'r') as f:
-            data = json.load(f)
+        data = load_metadata(meta_files[0])
         transcript = data.get('transcript')
         clips = data.get('shorts', [])
         if not transcript or clip_index >= len(clips):
             return None
         clip = clips[clip_index]
         import main as _main
-        # A recut clip is a concatenation of source segments, so the flat
-        # start..end window is wrong for it — caption against the clip-relative
-        # remapped transcript instead (same trick /api/subtitle uses).
-        recipe_segments = (clip.get('recipe') or {}).get('segments')
-        if recipe_segments:
-            v_transcript = recut.virtual_transcript(transcript, recipe_segments)
-            return _main.auto_caption_clip(
-                video_path, v_transcript, 0.0,
-                recut.total_duration(recipe_segments))
-        return _main.auto_caption_clip(video_path, transcript,
-                                       clip['start'], clip['end'])
+        # A recut clip is a concatenation of source segments: clip_window
+        # remaps the transcript clip-relative (same trick /api/subtitle uses).
+        w_transcript, w_start, w_end = clip_window(transcript, clip)
+        return _main.auto_caption_clip(video_path, w_transcript, w_start, w_end)
     except Exception as e:
         print(f"⚠️  Could not re-apply captions to {video_path}: {e}")
         return None
@@ -192,9 +136,8 @@ def _recover_jobs_from_disk():
         if not json_files:
             continue
         try:
-            with open(json_files[0], 'r') as f:
-                data = json.load(f)
-            base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+            data = load_metadata(json_files[0])
+            base_name = metadata_base_name(json_files[0])
             clips = data.get('shorts', [])
             for i, clip in enumerate(clips):
                 if not clip.get('video_url'):
@@ -927,10 +870,9 @@ async def run_job(job_id, job_data):
                     # Use a lock or just robust read? json.load might fail if file is partial.
                     # Usually main.py writes it once at start (based on my review).
                     if os.path.getsize(target_json) > 0:
-                        with open(target_json, 'r') as f:
-                            data = json.load(f)
-                            
-                        base_name = os.path.basename(target_json).replace('_metadata.json', '')
+                        data = load_metadata(target_json)
+
+                        base_name = metadata_base_name(target_json)
                         clips = data.get('shorts', [])
                         cost_analysis = data.get('cost_analysis')
                         
@@ -970,12 +912,11 @@ async def run_job(job_id, job_data):
                 if _relocate_root_job_artifacts(job_id, output_dir):
                     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
             if json_files:
-                target_json = json_files[0] 
-                with open(target_json, 'r') as f:
-                    data = json.load(f)
-                
+                target_json = json_files[0]
+                data = load_metadata(target_json)
+
                 # Enhance result with video URLs
-                base_name = os.path.basename(target_json).replace('_metadata.json', '')
+                base_name = metadata_base_name(target_json)
                 clips = data.get('shorts', [])
                 cost_analysis = data.get('cost_analysis')
 

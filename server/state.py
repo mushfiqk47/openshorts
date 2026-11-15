@@ -13,6 +13,8 @@ import asyncio
 from typing import Dict, Optional
 
 from dotenv import load_dotenv
+
+from core.jobs import Job
 from fastapi import Request
 
 load_dotenv()
@@ -103,6 +105,8 @@ else:
     async def get_current_user_optional(request: Request):
         # No-op dependency in self-host mode: every request is anonymous / BYOK.
         return None
+
+
 # Application State
 # PriorityQueue holds (priority, seq, job_id). Lower priority dispatches first:
 # pro=0, starter/creator=1, BYOK/anonymous/self-host=2. The seq counter keeps
@@ -110,7 +114,7 @@ else:
 # BILLING disabled every job enqueues at priority 2 → plain FIFO as before.
 job_queue = asyncio.PriorityQueue()
 _job_seq = itertools.count()
-jobs: Dict[str, Dict] = {}
+jobs: Dict[str, Job] = {}
 thumbnail_sessions: Dict[str, Dict] = {}
 publish_jobs: Dict[str, Dict] = {}  # {publish_id: {status, result, error}}
 # Semester to limit concurrency to MAX_CONCURRENT_JOBS

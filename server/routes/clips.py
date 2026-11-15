@@ -37,6 +37,13 @@ from server.jobs import (
     _strip_burned_hook,
 )
 from server.routes.process import _ensure_job_files
+from core.artifacts import (  # noqa: E402
+    clip_recipe_parts as _clip_recipe_parts,
+    clip_window,
+    load_metadata,
+    metadata_base_name,
+    save_metadata,
+)
 
 router = APIRouter()
 
@@ -138,9 +145,7 @@ async def edit_clip(
                 try:
                     meta_files = glob.glob(os.path.join(state.OUTPUT_DIR, req.job_id, "*_metadata.json"))
                     if meta_files:
-                        with open(meta_files[0], 'r') as f:
-                            data = json.load(f)
-                            transcript = data.get('transcript')
+                        transcript = load_metadata(meta_files[0]).get('transcript')
                 except Exception as e:
                     print(f"⚠️ Could not load transcript for editing context: {e}")
 
@@ -191,14 +196,12 @@ async def edit_clip(
         try:
             meta_files = glob.glob(os.path.join(state.OUTPUT_DIR, req.job_id, "*_metadata.json"))
             if meta_files:
-                with open(meta_files[0], 'r') as f:
-                    meta = json.load(f)
+                meta = load_metadata(meta_files[0])
                 shorts = meta.get('shorts', [])
                 if req.clip_index < len(shorts):
                     shorts[req.clip_index]['video_url'] = new_video_url
                     meta['shorts'] = shorts
-                    with open(meta_files[0], 'w') as f:
-                        json.dump(meta, f, indent=4)
+                    save_metadata(meta_files[0], meta)
         except Exception as e:
             print(f"⚠️ Failed to update metadata.json: {e}")
 
@@ -231,8 +234,7 @@ async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
 
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
+    data = load_metadata(json_files[0])
 
     transcript = data.get('transcript')
     if not transcript:
@@ -244,15 +246,10 @@ async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
 
     clip_data = clips[clip_index]
 
-    # Recut clips are concatenations of source segments; remap the transcript
-    # onto the clip timeline so every consumer keeps its flat start..end logic.
-    recipe_segments = (clip_data.get('recipe') or {}).get('segments')
-    if recipe_segments:
-        transcript = recut.virtual_transcript(transcript, recipe_segments)
-        clip_start, clip_end = 0.0, recut.total_duration(recipe_segments)
-    else:
-        clip_start = clip_data.get('start', 0)
-        clip_end = clip_data.get('end', 0)
+    # Recut clips are concatenations of source segments; clip_window remaps
+    # the transcript onto the clip timeline so every consumer keeps its flat
+    # start..end logic.
+    transcript, clip_start, clip_end = clip_window(transcript, clip_data)
 
     # Extract words within clip range and convert to CaptionWord format
     captions = []
@@ -302,17 +299,6 @@ def _source_duration_seconds(path):
     return None
 
 
-def _clip_recipe_parts(clip):
-    """(segments, canonical_range) for a clip — synthesized from the flat
-    start/end for clips that were never recut."""
-    recipe = clip.get('recipe') or {}
-    fallback = {"start": float(clip.get('start', 0) or 0),
-                "end": float(clip.get('end', 0) or 0)}
-    segments = recipe.get('segments') or [dict(fallback)]
-    canonical_range = recipe.get('canonical_range') or dict(fallback)
-    return segments, canonical_range
-
-
 @router.get("/api/clip/{job_id}/{clip_index}/edl")
 async def get_clip_edl(job_id: str, clip_index: int, request: Request):
     """The clip's editable recipe: which source segments it was cut from, the
@@ -328,8 +314,7 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
+    data = load_metadata(json_files[0])
 
     clips = data.get('shorts', [])
     if clip_index < 0 or clip_index >= len(clips):
@@ -358,7 +343,7 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
 
     current_file = (clip.get('video_url') or '').split('/')[-1]
     if not current_file:
-        base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+        base_name = metadata_base_name(json_files[0])
         current_file = _canonical_clip_file(output_dir, base_name, clip_index)
 
     total = recut.total_duration(segments)
@@ -453,8 +438,7 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
+    data = load_metadata(json_files[0])
 
     clips = data.get('shorts', [])
     if req.clip_index < 0 or req.clip_index >= len(clips):
@@ -462,7 +446,7 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
     clip = clips[req.clip_index]
     transcript = data.get('transcript') or {}
 
-    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    base_name = metadata_base_name(json_files[0])
     clean_name = f"{base_name}_clip_{req.clip_index + 1}.mp4"
     canonical_path = os.path.join(output_dir, clean_name)
 
@@ -563,8 +547,7 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
             updates['crop_overrides'] = None
         clip.update(updates)
         data['shorts'] = clips
-        with open(json_files[0], 'w') as f:
-            json.dump(data, f, indent=2)
+        save_metadata(json_files[0], data, indent=2)
         mem_clips = (job.get('result') or {}).get('clips') or []
         if req.clip_index < len(mem_clips):
             mem_clips[req.clip_index].update(updates)
@@ -647,8 +630,7 @@ async def get_clip_scenes(job_id: str, clip_index: int, request: Request):
     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
+    data = load_metadata(json_files[0])
 
     clips = data.get('shorts', [])
     if clip_index < 0 or clip_index >= len(clips):
@@ -836,8 +818,7 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
     if not json_files:
         raise HTTPException(status_code=404, detail="Metadata not found")
-    with open(json_files[0], 'r') as f:
-        data = json.load(f)
+    data = load_metadata(json_files[0])
 
     clips = data.get('shorts', [])
     if req.clip_index < 0 or req.clip_index >= len(clips):
@@ -876,7 +857,7 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
     v_transcript = (recut.virtual_transcript(data.get('transcript') or {}, segments)
                     if req.reapply_captions else None)
 
-    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    base_name = metadata_base_name(json_files[0])
     # The CLEAN base name, exactly as /api/clip/rerender does — never the
     # current derived file. perform_recut prefixes whatever it is given, so
     # feeding it the newest derivative made every re-render add another
@@ -911,8 +892,7 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
         }
         clip.update(updates)
         data['shorts'] = clips
-        with open(json_files[0], 'w') as f:
-            json.dump(data, f, indent=2)
+        save_metadata(json_files[0], data, indent=2)
         mem_clips = (job.get('result') or {}).get('clips') or []
         if req.clip_index < len(mem_clips):
             mem_clips[req.clip_index].update(updates)
@@ -1059,9 +1039,7 @@ async def generate_effects_config(
                 try:
                     meta_files = glob.glob(os.path.join(state.OUTPUT_DIR, req.job_id, "*_metadata.json"))
                     if meta_files:
-                        with open(meta_files[0], 'r') as f:
-                            data = json.load(f)
-                            transcript = data.get('transcript')
+                        transcript = load_metadata(meta_files[0]).get('transcript')
                 except Exception as e:
                     print(f"⚠️ Could not load transcript for effects config: {e}")
 
