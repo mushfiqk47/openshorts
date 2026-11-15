@@ -43,9 +43,24 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Configuration
-# Default to 1 if not set, but user can set higher for powerful servers
+# Startup value for the job-slot semaphore. Live edits through Settings re-read
+# os.environ (see _max_concurrent_jobs / _refresh_concurrency_semaphore below).
 MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
-MAX_FILE_SIZE_MB = 2048  # 2GB limit
+_concurrency_capacity = MAX_CONCURRENT_JOBS
+
+def _max_file_size_mb() -> int:
+    """Live read of the upload size limit (Settings-writable, no restart)."""
+    try:
+        return max(1, int(os.environ.get("MAX_FILE_SIZE_MB", "2048")))
+    except ValueError:
+        return 2048
+
+def _max_concurrent_jobs() -> int:
+    """Live read of the job-slot count (Settings-writable, no restart)."""
+    try:
+        return max(1, int(os.environ.get("MAX_CONCURRENT_JOBS", str(MAX_CONCURRENT_JOBS))))
+    except ValueError:
+        return MAX_CONCURRENT_JOBS
 
 # How TikTok receives our uploads. MEDIA_UPLOAD lands the video in the user's
 # TikTok drafts so they finish the post inside TikTok's own editor; DIRECT_POST
@@ -413,6 +428,16 @@ thumbnail_sessions: Dict[str, Dict] = {}
 publish_jobs: Dict[str, Dict] = {}  # {publish_id: {status, result, error}}
 # Semester to limit concurrency to MAX_CONCURRENT_JOBS
 concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+
+def _refresh_concurrency_semaphore() -> None:
+    """Swap in a fresh semaphore when MAX_CONCURRENT_JOBS was edited via Settings.
+    Slots already granted stay valid: holders release the object they acquired
+    (captured at acquire time), never the module global."""
+    global concurrency_semaphore, _concurrency_capacity
+    desired = _max_concurrent_jobs()
+    if desired != _concurrency_capacity:
+        concurrency_semaphore = asyncio.Semaphore(desired)
+        _concurrency_capacity = desired
 
 
 def _enqueue_job(job_id: str, priority: int = 2):
@@ -875,12 +900,16 @@ async def process_queue():
             # Wait for a job (priority, seq, job_id) — lowest priority first.
             _priority, _seq, job_id = await job_queue.get()
 
+            # Live Settings edits resize the slot count between dispatches.
+            _refresh_concurrency_semaphore()
+            sem = concurrency_semaphore
+
             # Acquire semaphore slot (waits if max jobs are running)
-            await concurrency_semaphore.acquire()
+            await sem.acquire()
             print(f"🔄 Acquired slot for job: {job_id}")
 
             # Process in background task to not block the loop (allowing other slots to fill)
-            asyncio.create_task(run_job_wrapper(job_id))
+            asyncio.create_task(run_job_wrapper(job_id, sem))
             
         except Exception as e:
             print(f"❌ Queue dispatch error: {e}")
@@ -913,8 +942,10 @@ async def _track_proxy_usage(job_id):
             print(f"⚠️ Proxy alert failed: {e}")
 
 
-async def run_job_wrapper(job_id):
-    """Wrapper to run job and release semaphore"""
+async def run_job_wrapper(job_id, sem=None):
+    """Wrapper to run job and release the semaphore slot it was granted"""
+    if sem is None:
+        sem = concurrency_semaphore
     try:
         job = jobs.get(job_id)
         if job:
@@ -942,7 +973,7 @@ async def run_job_wrapper(job_id):
         # Telegram pulse for high-signal activity (first clip / paid user).
         await _notify_clip_activity(job_id)
         # Always release semaphore and mark queue task done
-        concurrency_semaphore.release()
+        sem.release()
         job_queue.task_done()
         print(f"✅ Released slot for job: {job_id}")
 
@@ -2127,7 +2158,7 @@ async def process_endpoint(
 
         # Read file in chunks to check size
         size = 0
-        limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+        limit_bytes = _max_file_size_mb() * 1024 * 1024
 
         with open(input_path, "wb") as buffer:
             while content := await file.read(1024 * 1024): # Read 1MB chunks
@@ -2135,7 +2166,7 @@ async def process_endpoint(
                 if size > limit_bytes:
                     os.remove(input_path)
                     shutil.rmtree(job_output_dir)
-                    raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
+                    raise HTTPException(status_code=413, detail=f"File too large. Max size {_max_file_size_mb()}MB")
                 buffer.write(content)
 
         upload_duration = _media_duration_seconds(input_path)
@@ -4448,13 +4479,13 @@ async def thumbnail_upload(
         safe_name = os.path.basename(file.filename or "upload") or "upload"
         video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_name}")
         size = 0
-        limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+        limit_bytes = _max_file_size_mb() * 1024 * 1024
         with open(video_path, "wb") as buffer:
             while chunk := await file.read(1024 * 1024):
                 size += len(chunk)
                 if size > limit_bytes:
                     os.remove(video_path)
-                    raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
+                    raise HTTPException(status_code=413, detail=f"File too large. Max size {_max_file_size_mb()}MB")
                 buffer.write(chunk)
 
     # Meter a fixed guard cost for the background download + transcription
@@ -4567,13 +4598,13 @@ async def thumbnail_analyze(
             safe_name = os.path.basename(file.filename or "upload") or "upload"
             video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_name}")
             size = 0
-            limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+            limit_bytes = _max_file_size_mb() * 1024 * 1024
             with open(video_path, "wb") as buffer:
                 while chunk := await file.read(1024 * 1024):
                     size += len(chunk)
                     if size > limit_bytes:
                         os.remove(video_path)
-                        raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
+                        raise HTTPException(status_code=413, detail=f"File too large. Max size {_max_file_size_mb()}MB")
                     buffer.write(chunk)
 
     # Meter the managed Gemini analysis (no-op for self-host).
@@ -5498,7 +5529,10 @@ async def saasshorts_generate(
     }
 
     async def run_generation():
-        await concurrency_semaphore.acquire()
+        # Capture the object we acquired so a live semaphore resize can't
+        # make this release land on a different (fresh) semaphore.
+        sem = concurrency_semaphore
+        await sem.acquire()
         try:
             loop = asyncio.get_running_loop()
 
@@ -5562,7 +5596,7 @@ async def saasshorts_generate(
                 saas_jobs[job_id]["status"] = "failed"
                 saas_jobs[job_id]["logs"].append(f"Error: {str(e)}")
         finally:
-            concurrency_semaphore.release()
+            sem.release()
 
     asyncio.create_task(run_generation())
 
