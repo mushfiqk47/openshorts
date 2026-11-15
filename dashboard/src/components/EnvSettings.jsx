@@ -162,7 +162,7 @@ function ColabGuide() {
 // Transcription models: drives the nemo-speech runtime (list / download /
 // smoke test). Independent of the AI analysis provider above — this is the
 // ASR (parakeet) side of the pipeline.
-function TranscriptionModels() {
+function TranscriptionModels({ asrUrl, onAsrUrlChange }) {
   const [models, setModels] = useState(null);
   const [active, setActive] = useState('');
   const [job, setJob] = useState(null);
@@ -213,7 +213,22 @@ function TranscriptionModels() {
   return (
     <div className="mt-6">
       <h3 className="text-sm font-medium text-ink lowercase">transcription models</h3>
-      <p className="text-xs text-muted mb-3">The ASR brain (NeMo-Speech.cpp on CUDA). Download a model here or let the first job pull it automatically; the smoke test proves the whole GPU chain before you upload anything.</p>
+      <p className="text-xs text-muted mb-3">The ASR brain (NeMo-Speech.cpp on CUDA). Download a model here or let the first job pull it automatically; the smoke test proves the whole chain before you upload anything.</p>
+      <label className="block mb-3">
+        <span className="text-xs text-ink2 font-medium">Google Colab URL <span className="font-mono text-[11px] text-muted/70">NEMO_ASR_URL</span></span>
+        <input
+          type="text"
+          value={asrUrl}
+          onChange={(e) => onAsrUrlChange(e.target.value)}
+          placeholder="https://...trycloudflare.com (empty = use the local GPU)"
+          className="input-field mt-1.5 font-mono text-sm"
+        />
+        <span className="text-xs text-muted mt-1 block">
+          {asrUrl
+            ? <>Remote mode: transcription goes to this Colab server, the local GPU stays idle. Hit <span className="text-ink2">test transcription</span> to verify it.</>
+            : 'Local mode: transcription runs on the CUDA GPU of this machine.'}
+        </span>
+      </label>
       {err && <p className="text-xs text-warn mb-2">{err}</p>}
       {!models ? (
         <p className="text-xs text-muted flex items-center gap-2"><RefreshCw size={12} className="animate-spin" /> reading the runtime…</p>
@@ -467,7 +482,10 @@ export default function EnvSettings() {
           </div>
         </div>
 
-        <TranscriptionModels />
+        <TranscriptionModels
+          asrUrl={draft['NEMO_ASR_URL'] ?? ''}
+          onAsrUrlChange={(v) => setField('NEMO_ASR_URL', v)}
+        />
 
         {GROUPS.map(group => (
           <div key={group.title} className="mt-6">

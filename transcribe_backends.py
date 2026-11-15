@@ -192,9 +192,12 @@ def smoke_test_transcription():
     session output. No speech is expected from a tone — the point is that the
     whole GPU chain runs. Returns (ok, detail_dict) for the API/UI.
     """
-    ok, detail = ensure_model_cached()
-    if not ok:
-        return False, {"stage": "model download", "error": detail}
+    model = os.environ.get("NEMO_ASR_MODEL", "").strip() or DEFAULT_NEMO_MODEL
+    remote = bool(_nemo_asr_url())
+    if not remote:
+        ok, detail = ensure_model_cached()
+        if not ok:
+            return False, {"stage": "model download", "error": detail}
 
     fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="asr_smoke_")
     os.close(fd)
@@ -205,26 +208,35 @@ def smoke_test_transcription():
              "-ac", "1", "-c:a", "pcm_s16le", wav_path],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             timeout=120)
-        bin_path = _resolve_nemo_bin()
-        model = os.environ.get("NEMO_ASR_MODEL", "").strip() or DEFAULT_NEMO_MODEL
-        started = time.time()
-        proc = subprocess.run(
-            [bin_path, "transcribe", wav_path, "--model", model, "--format", "json"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=_ASR_TIMEOUT_SECONDS)
-        elapsed = round(time.time() - started, 1)
-        if proc.returncode != 0:
-            tail = (proc.stderr or "")[-_STDERR_TAIL_CHARS:].strip()
-            return False, {"stage": "transcribe", "error": tail, "elapsed": elapsed}
-        backend = "CUDA" if "backend=CUDA" in (proc.stderr or "") else None
-        if not backend:
-            return False, {"stage": "gpu check",
-                           "error": "runtime did not report a CUDA backend",
-                           "elapsed": elapsed}
-        payload = json.loads(proc.stdout or "{}")
+        if remote:
+            payload, elapsed = _transcribe_remote(wav_path)
+            backend = str(payload.get("backend") or "")
+            if "CUDA" not in backend.upper():
+                return False, {"stage": "gpu check",
+                               "error": f"remote backend={backend or 'unknown'}",
+                               "elapsed": elapsed}
+        else:
+            bin_path = _resolve_nemo_bin()
+            model = os.environ.get("NEMO_ASR_MODEL", "").strip() or DEFAULT_NEMO_MODEL
+            started = time.time()
+            proc = subprocess.run(
+                [bin_path, "transcribe", wav_path, "--model", model, "--format", "json"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=_ASR_TIMEOUT_SECONDS)
+            elapsed = round(time.time() - started, 1)
+            if proc.returncode != 0:
+                tail = (proc.stderr or "")[-_STDERR_TAIL_CHARS:].strip()
+                return False, {"stage": "transcribe", "error": tail, "elapsed": elapsed}
+            backend = "CUDA" if "backend=CUDA" in (proc.stderr or "") else None
+            if not backend:
+                return False, {"stage": "gpu check",
+                               "error": "runtime did not report a CUDA backend",
+                               "elapsed": elapsed}
+            payload = json.loads(proc.stdout or "{}")
         return True, {
             "backend": backend,
             "model": model,
+            "remote": remote,
             "duration_s": payload.get("duration"),
             "elapsed": elapsed,
         }
@@ -265,31 +277,67 @@ def _require_cuda(stderr):
         "Install the CUDA build of the prebuilt release and check the NVIDIA driver.")
 
 
+def _nemo_asr_url():
+    """Remote transcription endpoint (e.g. Colab + cloudflared tunnel).
+
+    When set, transcription POSTs the wav to this server instead of running
+    the local binary: the machine running OpenShorts then needs no GPU and no
+    nemo-speech install. The server speaks the same JSON contract.
+    """
+    return os.environ.get("NEMO_ASR_URL", "").strip().rstrip("/")
+
+
+def _transcribe_remote(wav_path):
+    """One remote transcription round-trip. Returns (payload, elapsed_s)."""
+    import httpx
+    started = time.time()
+    with open(wav_path, "rb") as f:
+        resp = httpx.post(
+            _nemo_asr_url() + "/transcribe",
+            files={"file": (os.path.basename(wav_path), f, "audio/wav")},
+            timeout=_ASR_TIMEOUT_SECONDS)
+    elapsed = round(time.time() - started, 1)
+    if resp.status_code != 200:
+        raise RuntimeError(f"remote transcriber returned {resp.status_code}: {resp.text[-300:]}")
+    payload = resp.json()
+    backend = str(payload.get("backend") or "")
+    if backend and "CUDA" not in backend.upper():
+        raise RuntimeError(f"remote transcriber is not on CUDA (backend={backend})")
+    return payload, elapsed
+
+
 def _transcribe_with_nemo(media_path):
-    bin_path = _resolve_nemo_bin()
+    remote = bool(_nemo_asr_url())
     model = os.environ.get("NEMO_ASR_MODEL", "").strip() or DEFAULT_NEMO_MODEL
-    # Self-provisioning: a fresh machine or a new alias downloads its model
-    # here instead of failing deep inside transcribe.
-    ensure_ok, ensure_detail = ensure_model_cached(model)
-    if not ensure_ok:
-        raise RuntimeError(f"ASR model '{model}' unavailable: {ensure_detail}")
+    if not remote:
+        bin_path = _resolve_nemo_bin()
+        # Self-provisioning: a fresh machine or a new alias downloads its model
+        # here instead of failing deep inside transcribe.
+        ensure_ok, ensure_detail = ensure_model_cached(model)
+        if not ensure_ok:
+            raise RuntimeError(f"ASR model '{model}' unavailable: {ensure_detail}")
     wav_path = _extract_wav(media_path)
     try:
-        cmd = [bin_path, "transcribe", wav_path, "--model", model, "--format", "json"]
-        with _ASR_GATE:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=_ASR_TIMEOUT_SECONDS)
+        if remote:
+            print("🎙️ Transcribing via remote GPU (Colab)…", flush=True)
+            payload, _elapsed = _transcribe_remote(wav_path)
+        else:
+            cmd = [bin_path, "transcribe", wav_path, "--model", model, "--format", "json"]
+            with _ASR_GATE:
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=_ASR_TIMEOUT_SECONDS)
     finally:
         try:
             os.remove(wav_path)
         except OSError:
             pass
 
-    if proc.returncode != 0:
-        tail = (proc.stderr or "")[-_STDERR_TAIL_CHARS:].strip()
-        raise RuntimeError(f"nemo-speech transcribe failed ({proc.returncode}): {tail}")
-    _require_cuda(proc.stderr)
+    if not remote:
+        if proc.returncode != 0:
+            tail = (proc.stderr or "")[-_STDERR_TAIL_CHARS:].strip()
+            raise RuntimeError(f"nemo-speech transcribe failed ({proc.returncode}): {tail}")
+        _require_cuda(proc.stderr)
 
     try:
         payload = json.loads(proc.stdout)

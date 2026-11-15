@@ -31,6 +31,7 @@ ALLOWED_ENV = {
     "GEMINI_API_KEY",
     "GEMINI_MODEL",
     "AI_PROVIDER",
+    "NEMO_ASR_URL",
     "AI_BASE_URL",
     "AI_API_KEY",
     "AI_MODEL",
