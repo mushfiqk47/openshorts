@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, PanelLeft, PanelLeftClose, Menu } from 'lucide-react';
-import KeyInput from './components/KeyInput';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, PanelLeft, PanelLeftClose, Menu, StopCircle } from 'lucide-react';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
@@ -10,7 +9,6 @@ import ClipEditor from './components/ClipEditor';
 import ReframeEditor from './components/ReframeEditor';
 import UsageMeter from './components/UsageMeter';
 import TopUpModal from './components/TopUpModal';
-import StarBanner from './components/StarBanner';
 import PlanChoiceModal from './components/PlanChoiceModal';
 import TrialUpgradeModal from './components/TrialUpgradeModal';
 import LoginModal from './components/LoginModal';
@@ -23,6 +21,16 @@ import EnvSettings from './components/EnvSettings';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
 import { track } from './lib/analytics';
+
+// Map a location hash to an app tab. Root routes (#/pricing, #/account,
+// #/auth/*, #legal) never reach App — main.jsx resolves them; anything else
+// (including bare #app, #landing and legacy section anchors) lands on the
+// dashboard tab.
+const APP_TABS = ['dashboard', 'ai-agent', 'history', 'settings'];
+const tabFromHash = (hash) => {
+  const slug = (hash || '').replace(/^#\//, '');
+  return APP_TABS.includes(slug) ? slug : 'dashboard';
+};
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -234,6 +242,7 @@ function App() {
   });
   const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false);
   const [jobId, setJobId] = useState(null);
+  const [stopping, setStopping] = useState(false);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
   // Bulk subtitles: apply one style to every clip of the job (triggered from
@@ -245,7 +254,21 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
-  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, settings
+  const [activeTab, setActiveTab] = useState(() => tabFromHash(window.location.hash)); // dashboard, ai-agent, history, settings
+  // Tabs live in the hash (#/dashboard, #/ai-agent, #/history, #/settings) so
+  // the browser Back button returns to the previous tab instead of exiting
+  // the app. switchTab keeps URL and state in lockstep.
+  const switchTab = (id) => {
+    setActiveTab(id);
+    const target = `#/${id}`;
+    if (window.location.hash !== target) window.location.hash = target;
+  };
+
+  useEffect(() => {
+    const onHashChange = () => setActiveTab(tabFromHash(window.location.hash));
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
   // Reopened-project state (paid mode): per-clip {index, server_file, active_layers}
   // restored from the backend so ResultCards resume editing where they left off.
   const [projectState, setProjectState] = useState(null);
@@ -359,7 +382,7 @@ function App() {
     setProcessingMedia(null);
     setQualityGate(null);
     setStatus('complete');
-    setActiveTab('dashboard');
+    switchTab('dashboard');
   };
 
   // Apply one subtitle style to every clip of the job, sequentially.
@@ -450,7 +473,7 @@ function App() {
         else if (!session.noSource) setProcessingMedia({ type: 'server', payload: `/api/source/${session.jobId}` });
         if (session.noSource) setNoSource(true);
         if (session.projectState) setProjectState(session.projectState);
-        if (session.activeTab) setActiveTab(session.activeTab);
+        if (session.activeTab) switchTab(session.activeTab);
         // If was processing, resume polling; if complete/error, just show results
         setStatus(session.status === 'processing' ? 'processing' : session.status);
         setSessionRecovered(true);
@@ -555,6 +578,21 @@ function App() {
     return () => { cancelled = true; };
   }, [isManaged, jobId, results]);
 
+  const handleStopGeneration = async () => {
+    if (!jobId || stopping) return;
+    setStopping(true);
+    try {
+      const res = await apiFetch(`/api/stop/${jobId}`, { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
+      setLogs(prev => [...prev, "🛑 Stopping generation..."]);
+    } catch (e) {
+      console.error("Stop failed", e);
+      setLogs(prev => [...prev, "Stop failed: " + (e.message || e)]);
+    } finally {
+      setTimeout(() => setStopping(false), 1500);
+    }
+  };
+
   useEffect(() => {
     let interval;
     if ((status === 'processing' || status === 'completed') && jobId) {
@@ -571,6 +609,9 @@ function App() {
 
           if (data.status === 'completed') {
             setStatus('complete');
+            clearInterval(interval);
+          } else if (data.status === 'stopped') {
+            setStatus('stopped');
             clearInterval(interval);
           } else if (data.status === 'failed') {
             setStatus('error');
@@ -850,7 +891,7 @@ function App() {
               return (
                 <button
                   key={item.id}
-                  onClick={() => setActiveTab(item.id)}
+                  onClick={() => switchTab(item.id)}
                   title={isCollapsed ? item.label : undefined}
                   aria-current={isActive ? 'page' : undefined}
                   aria-label={item.label}
@@ -991,7 +1032,7 @@ function App() {
 
             {keysMissing && (
               <button
-                onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : setActiveTab('settings'))}
+                onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : switchTab('settings'))}
                 className="badge-warn hover:brightness-125 transition-all"
                 title="Configure AI API key (Gemini or OpenRouter free)"
               >
@@ -1016,7 +1057,7 @@ function App() {
               </div>
             </div>
             <button
-              onClick={() => setActiveTab('settings')}
+              onClick={() => switchTab('settings')}
               className="btn-quiet px-3 py-1.5 text-xs shrink-0"
             >
               Go to Settings
@@ -1042,7 +1083,7 @@ function App() {
         {gateThisTab && <TrialGate toolName={TOOL_NAMES[activeTab] || 'this'} />}
 
         {/* Advanced tools (AI Shorts, AI Agent): BYOK fal.ai + ElevenLabs notice. */}
-        {advancedThisTab && <AdvancedBanner needsPlan={needsPlan} onKeys={() => setActiveTab('settings')} />}
+        {advancedThisTab && <AdvancedBanner needsPlan={needsPlan} onKeys={() => switchTab('settings')} />}
 
         {/* Main Workspace */}
         <div className="flex-1 overflow-hidden relative">
@@ -1104,10 +1145,7 @@ function App() {
                 </div>
               ) : (
                 <>
-              <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
-              <div className="mt-8">
-                <EnvSettings />
-              </div>
+              <EnvSettings />
 
               <div className="card p-4 sm:p-6 mt-8 border-dashed opacity-80">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
@@ -1384,7 +1422,7 @@ function App() {
           )}
 
           {/* View: Processing / Results (Split View) */}
-          {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error') && (
+          {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error' || status === 'stopped') && (
             <div className="h-full flex flex-col md:flex-row gap-4 p-4 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade">
 
               {/* Left Panel: Preview & Status */}
@@ -1396,11 +1434,23 @@ function App() {
                   </h2>
                   <span className={status === 'processing' ? 'badge-brass' :
                     status === 'complete' ? 'badge-ok' :
-                      'badge-danger'
+                      status === 'stopped' ? 'badge-warn' :
+                        'badge-danger'
                     }>
                     {status.toUpperCase()}
                   </span>
                 </div>
+
+                {status === 'processing' && (
+                  <button
+                    onClick={handleStopGeneration}
+                    disabled={stopping}
+                    className="btn-danger w-full py-2 text-sm flex items-center justify-center gap-2"
+                  >
+                    {stopping ? <Loader2 size={14} className="animate-spin" /> : <StopCircle size={14} />}
+                    {stopping ? 'stopping…' : 'stop generation'}
+                  </button>
+                )}
 
                 {/* Video Preview */}
                 {processingMedia && (
@@ -1411,13 +1461,6 @@ function App() {
                     isSyncedPlaying={isSyncedPlaying}
                     syncTrigger={syncTrigger}
                   />
-                )}
-
-                {/* The wait is dead time — the best moment to ask for a star. */}
-                {status === 'processing' && (
-                  <div className="my-3">
-                    <StarBanner message="Free while it renders?" />
-                  </div>
                 )}
 
                 {/* Logs Terminal */}
@@ -1448,6 +1491,11 @@ function App() {
 
               {/* Right Panel: Results Grid */}
               <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} md:h-full flex flex-col shrink-0 md:shrink card p-4 sm:p-6 transition-all duration-700 ease-in-out`}>
+                {status === 'stopped' && (
+                  <div className="px-4 py-3 rounded-card border border-rule bg-paper2 text-xs text-muted mb-4">
+                    Generation stopped by you. Clips that finished before the stop are shown below, start a new job anytime.
+                  </div>
+                )}
                 <h2 className="font-display font-medium lowercase text-xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
                   Generated Shorts
                   {results?.clips?.length > 0 && (
@@ -1535,7 +1583,6 @@ function App() {
                         <span className="text-muted">Download what you want to keep, or raise JOB_RETENTION_SECONDS in your env.</span>
                       </div>
                     )}
-                    <StarBanner message="Happy with your clips?" />
                   </div>
                 )}
 
@@ -1609,7 +1656,7 @@ function App() {
               Cancel
             </button>
             <button
-              onClick={() => { setShowKeyModal(false); setActiveTab('settings'); }}
+              onClick={() => { setShowKeyModal(false); switchTab('settings'); }}
               className="btn-primary flex-1 px-4 py-2 text-sm"
             >
               Go to Settings

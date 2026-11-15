@@ -265,8 +265,9 @@
     <script>
       window.op = window.op || function () { var n = []; return new Proxy(function () { arguments.length && n.push([].slice.call(arguments)); }, { get: function (t, r) { return "q" === r ? n : function () { n.push([r].concat([].slice.call(arguments))); }; }, has: function (t, r) { return "q" === r; } }); }();
       (function () {
-        // Vite substitutes these at build time and leaves the literal
-        // "%VITE_...%" placeholder in place when the variable is undefined.
+        // Vite substitutes these at build time and leaves the raw placeholder
+        // text in place when the variable is undefined — the surrounding
+        // percent signs are the tell.
         var apiUrl = "%VITE_OPENPANEL_API_URL%";
         var clientId = "%VITE_OPENPANEL_CLIENT_ID%";
         var unset = function (v) { return !v || v.charAt(0) === "%"; };

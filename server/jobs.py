@@ -34,6 +34,7 @@ from server.state import (
     UPLOADS_MAX_GB,
     OUTPUT_MAX_GB,
     MAX_CONCURRENT_JOBS,
+    _refresh_concurrency_semaphore,
     managed_keys,
     cloud,
     _metering,
@@ -833,6 +834,15 @@ def enqueue_output(out, job_id):
 async def run_job(job_id, job_data):
     """Executes the subprocess for a specific job."""
     
+    # A stop requested while the job sat in the queue terminates it here,
+    # before any subprocess exists. The wrapper's finally still releases
+    # the slot and settles the reservation.
+    if jobs[job_id].get('stop_requested'):
+        jobs[job_id]['status'] = 'stopped'
+        jobs[job_id]["logs"].append("🛑 Generation stopped by user.")
+        print(f"🛑 [run_job] {job_id} stopped while queued")
+        return
+    
     cmd = job_data['cmd']
     env = job_data['env']
     output_dir = job_data['output_dir']
@@ -842,13 +852,21 @@ async def run_job(job_id, job_data):
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
     
     try:
+        popen_kwargs = {}
+        if os.name != 'nt':
+            # Own process group so a stop can kill the whole tree
+            # (ffmpeg children included) instead of orphaning them.
+            popen_kwargs['start_new_session'] = True
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, # Merge stderr to stdout
             env=env,
-            cwd=os.getcwd()
+            cwd=os.getcwd(),
+            **popen_kwargs
         )
+        # The stop endpoint needs this handle to terminate the tree.
+        jobs[job_id]['process'] = process
         
         # We need to capture logs in a thread because Popen isn't async
         t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))
@@ -894,6 +912,14 @@ async def run_job(job_id, job_data):
                 pass
 
         returncode = process.returncode
+        
+        # A stop lands here as a killed process: report it as a user
+        # action rather than running the failure classification below.
+        if jobs[job_id].get('stop_requested'):
+            jobs[job_id]['status'] = 'stopped'
+            jobs[job_id]["logs"].append("🛑 Generation stopped by user.")
+            print(f"🛑 [run_job] {job_id} stopped by user")
+            return
         
         if returncode == 0:
             jobs[job_id]['status'] = 'completed'

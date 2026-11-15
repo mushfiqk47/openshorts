@@ -146,8 +146,12 @@ async def process_endpoint(
     auto_hook_style: Optional[str] = Form(None),
     thumbnail_session_id: Optional[str] = Form(None)
 ):
+    provider_kind = (os.environ.get("AI_PROVIDER") or "").strip().lower()
     api_key = await resolve_gemini(request)
-    if not api_key:
+    # Keyless providers (own OpenAI-compatible endpoint / local Ollama) submit
+    # without an AI key; the cloud-style Gemini/OpenRouter gate only applies
+    # when one of those is actually the configured brain.
+    if not api_key and provider_kind not in ("custom", "ollama"):
         raise gemini_missing_error()
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
@@ -265,7 +269,12 @@ async def process_endpoint(
     # but set OPENROUTER_API_KEY as the authoritative one.
     provider = _resolve_ai_provider(request)
     model_for_job = _resolve_openrouter_model(request) if provider == "openrouter" else ""
-    if provider == "openrouter":
+    if provider_kind in ("custom", "ollama"):
+        # The subprocess reads AI_* / OLLAMA_* straight from the inherited env
+        # (the Settings panel writes them live) - nothing to route here.
+        provider = provider_kind
+        print(f"[ai-provider] job={job_id} provider={provider} (env-configured)")
+    elif provider == "openrouter":
         env["OPENROUTER_API_KEY"] = api_key
         env["GEMINI_API_KEY"] = api_key  # keep legacy fallback happy
         env["OPENROUTER_MODEL"] = model_for_job
@@ -454,6 +463,46 @@ async def get_status(job_id: str, request: Request):
         "logs": _visible_logs(job['logs']),
         "result": job.get('result')
     }
+
+
+@router.post("/api/stop/{job_id}")
+async def stop_job(job_id: str, request: Request):
+    """Kill a running generation (or cancel a queued one) at any moment.
+
+    The subprocess tree dies with it: taskkill /T on Windows covers the
+    ffmpeg children, killpg covers them on POSIX. The job lifecycle reports
+    this as status 'stopped' - a user action, not a failure - and the wrapper
+    still releases the slot and settles the minute reservation.
+    """
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = jobs[job_id]
+    await _assert_job_owner(request, job)
+
+    if job.get("status") not in ("queued", "processing"):
+        raise HTTPException(status_code=400, detail=f"Job already {job.get('status')}")
+
+    job["stop_requested"] = True
+
+    killed = False
+    proc = job.get("process")
+    if proc is not None and proc.poll() is None:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True)
+            killed = True
+        else:
+            import signal
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                killed = True
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+                killed = True
+
+    job.setdefault("logs", []).append("🛑 Stop requested by user.")
+    return {"ok": True, "job_id": job_id, "terminated": killed}
 @router.get("/api/source/{job_id}")
 async def get_source_video(job_id: str):
     """Stream a job's original source video for the live-analysis preview and
