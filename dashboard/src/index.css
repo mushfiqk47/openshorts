@@ -1,4 +1,4 @@
-/* Hallmark · genre: atmospheric · theme: lumen (night foundry) · design-system: design.md · designed-as-app */
+/* Stark · graphite (MiniMax dark) · design-system: design.md · designed-as-app */
 @import url('https://fonts.googleapis.com/css2?family=Noto+Serif:wght@700&display=swap'); /* hook-overlay font burned into videos — not UI */
 @import './tokens.css';
 @tailwind base;
@@ -6,6 +6,13 @@
 @tailwind utilities;
 
 @layer base {
+  /* Dark app: native controls (scrollbars, select popups, spinners) must
+   * render dark too, or Windows paints a glaring light scrollbar strip on
+   * every scroll container without .custom-scrollbar. */
+  :root {
+    color-scheme: dark;
+  }
+
   body {
     @apply bg-paper text-ink2 antialiased;
     font-family: var(--font-body);
@@ -25,12 +32,11 @@
 }
 
 @layer components {
-  /* hairline card, lit from within — replaces every glass/surface card */
+  /* flat hairline card — MiniMax documentation-register chrome: surface + 1px
+   * hairline, no emission, no shadow. Elevation is the border, nothing else. */
   .card,
   .glass-panel {
-    background:
-      radial-gradient(120% 90% at 50% 0%, var(--color-paper-emit) 0%, transparent 70%),
-      var(--color-paper-2);
+    background: var(--color-paper-2);
     border: 1px solid var(--color-rule);
     border-radius: var(--radius-card);
   }
@@ -41,7 +47,7 @@
                 background-color var(--dur-short) var(--ease-out);
   }
   .card-hover:hover {
-    transform: translateY(-4px);
+    transform: translateY(-2px);
     border-color: var(--color-rule-2);
   }
 
@@ -75,7 +81,7 @@
     transition: border-color var(--dur-short) var(--ease-out);
   }
   .input-field::placeholder { color: var(--color-muted); opacity: 0.7; }
-  .input-field:focus { border-color: var(--color-accent); }
+  .input-field:focus { border-color: var(--color-focus); }
 
   .btn-primary {
     @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-medium lowercase;
@@ -84,18 +90,20 @@
     border-radius: 999px;
     transition: filter var(--dur-short) var(--ease-out), transform var(--dur-short) var(--ease-out);
   }
-  .btn-primary:hover { filter: brightness(1.08); }
-  .btn-primary:active { transform: translateY(1px); }
+  /* ink-fill pill: rest = near-white, pressed lifts to charcoal (MiniMax rule) */
+  .btn-primary:hover { filter: brightness(0.94); }
+  .btn-primary:active { filter: brightness(0.88); transform: translateY(1px); }
   .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
+  /* outline pill (MiniMax button-secondary): 1px ink border, full ink on hover */
   .btn-ghost {
     @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-medium lowercase text-ink;
     background: transparent;
-    border: 1px solid var(--color-rule-2);
+    border: 1px solid color-mix(in oklab, var(--color-ink) 55%, transparent);
     border-radius: 999px;
     transition: border-color var(--dur-short) var(--ease-out), background-color var(--dur-short) var(--ease-out);
   }
-  .btn-ghost:hover { border-color: var(--color-accent); }
+  .btn-ghost:hover { border-color: var(--color-ink); }
   .btn-ghost:active { transform: translateY(1px); }
   .btn-ghost:disabled { opacity: 0.45; cursor: not-allowed; }
 

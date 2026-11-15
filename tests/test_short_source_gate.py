@@ -17,24 +17,7 @@ import pytest
 app_module = pytest.importorskip("app")
 
 
-def _post_process(json_body=None, files=None, data=None, with_transcript=False):
-    """POST /api/process like the dashboard does.
-
-    With Whisper gone a transcript is required at submit, so pass-through
-    cases (expect-200) attach a minimal one via multipart — the endpoint's own
-    documented path ("works for uploads and URL sources alike"). Rejection
-    cases stay transcript-less, which additionally pins that the duration
-    gate fires BEFORE the transcript check."""
-    if with_transcript:
-        srt = b"1\n00:00:00,000 --> 00:00:05,000\nhello world\n"
-        files = dict(files or {})
-        files["transcript"] = ("source.srt", srt, "text/plain")
-        if json_body:
-            data = {"url": json_body["url"],
-                    "acknowledged": "true" if json_body.get("acknowledged") else "false"}
-            if json_body.get("force_low_quality"):
-                data["force_low_quality"] = "true"
-            json_body = None
+def _post_process(json_body=None, files=None, data=None):
     async def _do():
         transport = httpx.ASGITransport(app=app_module.app)
         async with httpx.AsyncClient(transport=transport,
@@ -80,24 +63,21 @@ def test_short_url_rejected_even_with_force_low_quality(dirs, monkeypatch):
 
 def test_unknown_duration_fails_open(dirs, monkeypatch):
     _stub_probe(monkeypatch, duration=0)
-    resp = _post_process({"url": "https://www.youtube.com/watch?v=ok", "acknowledged": True},
-                         with_transcript=True)
+    resp = _post_process({"url": "https://www.youtube.com/watch?v=ok", "acknowledged": True})
     assert resp.status_code == 200
     assert "job_id" in resp.json()
 
 
 def test_long_url_source_passes(dirs, monkeypatch):
     _stub_probe(monkeypatch, duration=600)
-    resp = _post_process({"url": "https://www.youtube.com/watch?v=ok", "acknowledged": True},
-                         with_transcript=True)
+    resp = _post_process({"url": "https://www.youtube.com/watch?v=ok", "acknowledged": True})
     assert resp.status_code == 200
 
 
 def test_gate_disabled_lets_short_sources_through(dirs, monkeypatch):
     _stub_probe(monkeypatch, duration=24)
     monkeypatch.setattr(app_module, "MIN_SOURCE_SECONDS", 0)
-    resp = _post_process({"url": "https://www.youtube.com/watch?v=short", "acknowledged": True},
-                         with_transcript=True)
+    resp = _post_process({"url": "https://www.youtube.com/watch?v=short", "acknowledged": True})
     assert resp.status_code == 200
 
 
@@ -110,4 +90,20 @@ def test_short_upload_is_rejected_and_cleaned_up(dirs, monkeypatch):
     assert "24s" in resp.json()["detail"]
     # The rejected upload and its job dir must not linger on disk.
     assert os.listdir(up_root) == []
+    assert os.listdir(out_root) == []
+
+
+def test_short_thumbnail_session_is_rejected(dirs, monkeypatch):
+    out_root, up_root = dirs
+    video = up_root / "thumb_sess1_source.mp4"
+    video.write_bytes(b"fake-video-bytes")
+    monkeypatch.setitem(app_module.thumbnail_sessions, "sess1", {
+        "user_id": None, "video_path": str(video),
+        "transcript_ready": False, "transcript": None,
+    })
+    monkeypatch.setattr(app_module, "_media_duration_seconds", lambda path: 24.0)
+    resp = _post_process({"thumbnail_session_id": "sess1", "acknowledged": True})
+    assert resp.status_code == 400
+    # The session's own video stays; only the aborted job dir is cleaned.
+    assert os.path.exists(video)
     assert os.listdir(out_root) == []

@@ -4,9 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenShorts is an AI-powered vertical video generator that transforms long YouTube videos or local uploads into viral-ready short clips (9:16 format) for TikTok, Instagram Reels, and YouTube Shorts. Uses Gemini (default gemini-2.5-flash) for viral moment detection and title generation. Sources arrive with a user-supplied transcript file (.srt/.vtt/.txt/.md/.json, required at submit) — auto-transcription was removed.
+OpenShorts is an AI-powered vertical video generator that transforms long YouTube videos or local uploads into viral-ready short clips (9:16 format) for TikTok, Instagram Reels, and YouTube Shorts. Uses Google Gemini 2.0 Flash for viral moment detection and title generation.
 
 ## Development Commands
+
+### Windows Native (recommended)
+```bat
+setup.bat   # once per machine: prerequisites check, installs NeMo-Speech.cpp + Parakeet model (714 MB), Python + Node deps, creates .env
+run.bat     # every launch: starts backend :8000 + frontend :5175, health-checks both, opens the browser
+update.bat  # pulls latest code (stash-safe), refreshes deps + the nemo runtime + the agent knowledge graph
+stop.bat    # stops backend and frontend
+```
+The backend window reads .env at startup (AI_PROVIDER, NEMO_*, FFMPEG_ENCODER, keys).
 
 ### Local Development (Docker)
 ```bash
@@ -34,7 +43,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 ### Core Processing Pipeline
 1. **Ingest** - YouTube download (yt-dlp) or local upload
-2. **Transcript** - user-supplied file with word-level timestamps (required at submit)
+2. **Transcription** - NeMo-Speech.cpp (parakeet-tdt-0.6b-v3 GGUF) on CUDA, GPU-only
 3. **Scene Detection** - PySceneDetect for segment boundaries
 4. **AI Analysis** - Gemini identifies 3-15 viral moments (15-60 sec each)
 5. **FFmpeg Extraction** - Precise clip cutting
@@ -48,31 +57,27 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 ### Key Files
 | File | Purpose |
 |------|---------|
-| `main.py` | Clip pipeline composition root: download, scenes, Gemini/LLM stages, render |
-| `app.py` | FastAPI composition root + job-core routes (routers hold the split clusters) |
-| `config.py` / `state.py` | Import-time env constants + layout allow-list / shared job store singletons |
+| `main.py` | Core video processing: transcription, scene detection, clip extraction, vertical reframing |
+| `transcribe_backends.py` | ASR: NeMo-Speech.cpp (parakeet-tdt-0.6b-v3 GGUF) on CUDA, GPU-only by design |
+| `ollama_client.py` / `custom_client.py` | Local-model and any-OpenAI-compatible analysis providers (AI_PROVIDER=ollama/custom) |
+| `env_manager.py` | .env sync with live-apply; the dashboard Settings panel writes through it |
+| `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
-| `routers/` | Split route clusters: `system` (health/config/env/models), `gallery` (SEO pages), `social` (post/profiles/analytics/schedule) |
-| `pipeline/tracking.py` | SmoothedCameraman + SpeakerTracker (numpy-only, no ML stack) |
 | `hooks.py` | Hook text overlay generation with font rendering |
 | `s3_uploader.py` | AWS S3 upload with caching |
 | `subtitles.py` | SRT generation, FFmpeg subtitle burning, and dubbed video transcription |
 | `translate.py` | ElevenLabs dubbing API for AI voice translation |
-| `dashboard/src/App.jsx` | Composing screen (job submit/poll/results); key state in `hooks/useApiKeys.js`, crypto in `lib/crypto.js` |
+| `dashboard/src/App.jsx` | Main React component with state management |
 | `dashboard/src/components/TranslateModal.jsx` | Voice dubbing UI with language selection |
 | `dashboard/vite-plugin-seo.js` | Build-time SEO surface: injects crawler-visible homepage content, emits static pages, sitemap.xml and llms.txt |
 | `dashboard/seo/data.js` | Single source of truth for pricing, pipeline and competitor facts used by every generated page |
 
 ### SEO / AI-crawler surface
 
-The dashboard is a client-rendered SPA with hash routing, so the HTML served for
-`/` used to contain an empty `<div id="root">`. Googlebot renders JavaScript and
-saw the real page; GPTBot, ClaudeBot and PerplexityBot do not and measured the
-homepage as zero characters of text. `vite-plugin-seo.js` fixes that at build time:
+The runtime landing page was removed (owner decision, 2026-11-15): the app is the
+only SPA view, and old `#landing` bookmarks resolve to it. `vite-plugin-seo.js`
+runs at build time and does two things, none at runtime:
 
-- Injects the content of `seo/landing-fallback.js` into `#root`. React's
-  `createRoot().render()` replaces it on mount, so users get the app and
-  non-executing clients get the copy. **Keep it in sync with `Landing.jsx`.**
 - Emits the standalone pages (the `/alternatives` cluster, the clip-generator,
   open-source, use-case and automation pages, and `/mcp`; the full list is
   `buildPages()` in `seo/pages.js`) as flat `.html` files.
@@ -81,6 +86,10 @@ homepage as zero characters of text. `vite-plugin-seo.js` fixes that at build ti
   would then point at a redirect.
 - Generates `sitemap.xml` and `llms.txt` from the same page list, so they cannot
   drift. Do not add a static `public/sitemap.xml` back.
+
+The homepage crawler-content injection is gone with the landing: `/` is the app
+itself, client-rendered, so non-JS crawlers see only its meta tags. The static
+pages are the crawlable surface.
 
 When editing pricing anywhere, edit `seo/data.js` too. Nothing on the site should
 say "OpenShorts is free" without naming the Cloud price in the same breath: both
@@ -219,8 +228,75 @@ Async job queue with semaphore-based concurrency control. Configure via `MAX_CON
 
 > API keys are stored encrypted in the browser and sent via headers only when needed. Never stored server-side.
 
+## Agent tooling: knowledge graph (graphify)
+
+The codebase is mapped into a queryable knowledge graph (graphify: tree-sitter
+AST over the code, deterministic and local). Query it instead of grepping:
+
+- `graphify-out/graph.json` — the graph. With `uv tool install graphifyy`:
+  `graphify query "how does the env manager apply changes live"`,
+  `graphify explain "SmoothedCameraman"`, `graphify path "A" "B"`,
+  `graphify affected "render_clip"`.
+- `graphify-out/GRAPH_REPORT.md` — key concepts, architectural hubs, suggested questions.
+- Refresh after code changes: `update.bat` runs `graphify update .` (code-only,
+  no LLM). A full rebuild including the docs semantic pass goes through the
+  graphify skill (`/graphify .`).
+
+## Agent rules (hard-won, do not relearn)
+
+These were paid for with real failed jobs. Violating any of them reintroduces a
+bug that already shipped once.
+
+1. **Transcription is GPU-only.** `_require_cuda` refuses any runtime whose
+   session line lacks `backend=CUDA`. Never add a CPU fallback for ASR. The
+   failure paths (NoAudioError, missing file, cut failure) must stay explicit
+   and actionable.
+2. **AI provider dispatch goes through `_ai_provider()` in main.py**: custom
+   (any OpenAI-compatible endpoint via AI_BASE_URL/AI_API_KEY/AI_MODEL),
+   ollama, openrouter, gemini. New providers plug into `_run_ai_stage` only —
+   stage call sites must not import client modules directly.
+3. **Reasoning models break forced JSON mode.** With `response_format:
+   {"type":"json_object"}`, reasoning models (lfm3-vl, mimo-v2.6-heretic)
+   spend their whole budget thinking in the hidden reasoning field and return
+   empty content (finish_reason=length). The ollama/custom clients therefore
+   use free-form output with `max_tokens=16384` and extract via
+   `gemini_worker._parse_json_response_text`, falling back to the reasoning
+   field when content is empty.
+4. **ffmpeg filter graphs need two layers of Windows path escaping.**
+   Backslashes are escape characters inside a filter graph, and the
+   drive-letter colon is an option separator that breaks even quoted values
+   ("No option name near '/Users/...'"). Correct form: forward slashes plus an
+   escaped colon (`C\:/path/file`). This silently killed reframe v2 on every
+   Windows render (it fell back to the slow v1 frame loop).
+5. **Never combine `-hwaccel_output_format cuda` with `-pix_fmt yuv420p`**
+   on ffmpeg 9: CUDA frames cannot pass the CPU pixel-format filter, and every
+   cut dies with -40 writing a zero-byte file. `hwaccel_decode_args()` returns
+   plain `-hwaccel cuda` on purpose.
+6. **Check subprocess return codes and output validity.** The clip cut fails
+   fast with ffmpeg's stderr tail; a missing or zero-byte temp file raises
+   instead of cascading into TransNetV2/OpenCV errors.
+7. **New env vars need three touchpoints**: `env_manager.ALLOWED_ENV`
+   (+ `VALID_CHOICES` when the set is closed) so the dashboard can write them,
+   a cache reset in `apply_updates` when something memoizes, and the consumer
+   must read `os.environ` at use time — import-time reads ignore UI edits.
+8. **Batch files: cmd has no backslash escaping.** Inside `( )` blocks a bare
+   `)` in unquoted echo text closes the block, and a mis-nested
+   `"...\"& {...\""` makes cmd split at `&`. PowerShell one-liners inside
+   blocks use the paren form `iex ((irm 'URL') + ' args')`. A bare `>` in echo
+   text is a redirect — escape it as `^>`.
+9. **The vite dev server can stop watching files** after long sessions: served
+   modules go stale while disk files changed. If UI edits do not apply,
+   restart the frontend (stop.bat + run.bat) before debugging the code.
+10. **Windows pip torch is CPU-only by default.** The Clip Generator needs the
+   CUDA wheel from the pytorch index, and PEP 440 means a plain `torch==2.11.0`
+   pin matches the installed `+cpu` wheel and installs nothing — pin the local
+   version explicitly (`torch==2.11.0+cu130 ... --index-url
+   https://download.pytorch.org/whl/cu130`). setup.bat does this when
+   nvidia-smi is present; TransNetV2 and YOLO then run on the GPU instead of
+   their CPU fallbacks.
+
 ## Tech Stack
-- **Backend:** Python 3.11, FastAPI, google-genai, ultralytics (YOLOv8), mediapipe, opencv-python, yt-dlp, FFmpeg, httpx
+- **Backend:** Python 3.11, FastAPI, google-genai, NeMo-Speech.cpp (Parakeet CUDA), ultralytics (YOLOv8), mediapipe, opencv-python, yt-dlp, FFmpeg, httpx
 - **Frontend:** React 18, Vite 4, Tailwind CSS 3.4
 - **External APIs:** Google Gemini, ElevenLabs Dubbing, Upload-Post
 - **Infrastructure:** Docker + Docker Compose, AWS S3

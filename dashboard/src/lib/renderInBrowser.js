@@ -1,7 +1,5 @@
-// The Remotion web renderer (~1 MB) loads on demand, not with the app shell:
-// static imports here pulled the whole runtime into the initial chunk (it was
-// reachable from ResultCard via this module). `renderInBrowser` is async and
-// every caller awaits it, so the dynamic import changes nothing at the seam.
+import { renderMediaOnWeb } from '@remotion/web-renderer';
+import { ShortVideo } from '../remotion/compositions/ShortVideo';
 
 /**
  * Renders a Remotion composition directly in the browser using WebCodecs.
@@ -26,10 +24,6 @@ export async function renderInBrowser({
     onProgress,
     signal,
 }) {
-    const [{ renderMediaOnWeb }, { ShortVideo }] = await Promise.all([
-        import('@remotion/web-renderer'),
-        import('../remotion/compositions/ShortVideo'),
-    ]);
     const fps = 30;
     const durationInFrames = Math.max(1, Math.round(durationInSeconds * fps));
 

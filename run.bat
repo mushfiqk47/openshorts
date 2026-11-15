@@ -3,7 +3,7 @@ setlocal EnableDelayedExpansion
 title OpenShorts Launcher
 cd /d "%~dp0"
 echo ==================================================
-echo  OpenShorts - Local Clips-Only + Ollama LLM
+echo  OpenShorts - Local Clips-Only + OpenRouter Free
 echo ==================================================
 echo.
 
@@ -14,9 +14,8 @@ if not exist ".env" (
 )
 if exist ".env" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
-    if /i "%%A"=="LLM_MODEL" set "LLM_MODEL=%%B"
-    if /i "%%A"=="LLM_PROVIDER" set "LLM_PROVIDER=%%B"
-    if /i "%%A"=="LLM_BASE_URL" set "LLM_BASE_URL=%%B"
+    if /i "%%A"=="OPENROUTER_MODEL" set "OPENROUTER_MODEL=%%B"
+    if /i "%%A"=="NEMO_SPEECH_BIN" set "NEMO_SPEECH_BIN=%%B"
   )
 )
 
@@ -51,6 +50,30 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+
+REM -- nemo-speech: the CUDA transcription runtime (parakeet-tdt-0.6b-v3 GGUF) --
+REM Make the installer's default location visible to the backend window even
+REM when this shell was launched before the installer updated the user PATH.
+set "NEMOSPEECH_BIN_DIR=%LOCALAPPDATA%\Programs\NeMoSpeech\bin"
+if exist "%NEMOSPEECH_BIN_DIR%\nemo-speech.exe" set "PATH=%PATH%;%NEMOSPEECH_BIN_DIR%"
+if defined NEMO_SPEECH_BIN (
+  echo   Transcription via NEMO_SPEECH_BIN from .env
+) else if exist "%NEMOSPEECH_BIN_DIR%\nemo-speech.exe" (
+  echo   nemo-speech found - transcription runs on CUDA
+) else (
+  where nemo-speech >nul 2>nul
+  if errorlevel 1 (
+    echo [WARN] nemo-speech not found - transcription needs it: GPU-only, no CPU fallback
+    echo   Install the prebuilt release, then restart this launcher:
+    echo     powershell -Command "irm https://github.com/NVIDIA/NeMo-Speech.cpp/raw/main/scripts/install.ps1 | iex"
+    echo   Or set NEMO_SPEECH_BIN in .env to the binary path.
+  ) else (
+    echo   nemo-speech found in PATH - transcription runs on CUDA
+  )
+)
+
+where nvidia-smi >nul 2>nul
+if errorlevel 1 echo [WARN] nvidia-smi not found - transcription needs an NVIDIA GPU and refuses to run on CPU
 
 echo [1/4] Checking Python deps...
 python -c "import fastapi, uvicorn, openai" >nul 2>nul
@@ -89,7 +112,7 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000" ^| findstr "LISTENING
   taskkill /F /PID %%a >nul 2>nul
 )
 
-REM Start backend in new window - uses .env for DISABLE_YOUTUBE_URL, OPENROUTER_*, WHISPER_*
+REM Start backend in new window - uses .env for DISABLE_YOUTUBE_URL, OPENROUTER_*, NEMO_*
 start "OpenShorts Backend" cmd /k "cd /d ""%~dp0"" && set ""PYTHONUTF8=1"" && set ""PYTHONIOENCODING=utf-8"" && python -m uvicorn app:app --host 0.0.0.0 --port 8000"
 
 REM Wait for backend health
@@ -116,7 +139,7 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5175" ^| findstr "LISTENING
   taskkill /F /PID %%a >nul 2>nul
 )
 REM Start frontend in new window - inherits VITE_PROXY_TARGET
-start "OpenShorts Frontend" cmd /k "cd /d ""%~dp0\dashboard"" && set ""VITE_PROXY_TARGET=http://localhost:8000"" && set ""VITE_RENDER_TARGET=http://localhost:3100"" && npm.cmd run start"
+start "OpenShorts Frontend" cmd /k "cd /d ""%~dp0\dashboard"" && set ""VITE_PROXY_TARGET=http://localhost:8000"" && set ""VITE_RENDER_TARGET=http://localhost:3100"" && npm.cmd run dev -- --host 0.0.0.0 --port 5175"
 
 timeout /t 5 /nobreak >nul 2>nul || ping -n 6 127.0.0.1 >nul
 echo.
@@ -126,10 +149,12 @@ echo    Frontend: http://localhost:5175/
 echo    Backend:  http://localhost:8000/health  +  /api/config
 echo    API docs: http://localhost:8000/docs
 echo ==================================================
-echo  AI Provider: %LLM_PROVIDER% (default)
-echo    Endpoint: %LLM_BASE_URL%
-echo    Model:    %LLM_MODEL%
-echo    (Local Ollama, any OpenAI-compatible base model, or Gemini)
+echo  Settings - in the UI paste your OpenRouter key:
+echo    sk-or-v1-... from https://openrouter.ai/keys
+echo    Pick a free model e.g. google/gemma-4-26b-a4b-it:free
+echo    Your .env already has: %OPENROUTER_MODEL%
+echo  Transcription - NeMo-Speech.cpp (parakeet) on CUDA. Model, CLI path and
+echo    ASR concurrency are editable live in the UI: Settings ^> GPU / Performance
 echo  Mode: DISABLE_YOUTUBE_URL=true (upload file only, no YouTube)
 echo  Test clip: uploads/speech80.mp4 (80s, 17 segments)
 echo ==================================================

@@ -124,6 +124,12 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
     // numbers rather than a range so either end can be re-marked on its own.
     const [markIn, setMarkIn] = useState(null);
     const [markOut, setMarkOut] = useState(null);
+    // The transcript keeps the active word centred while the monitor plays.
+    // A toggle, not a heuristic: when the user scrolls away to read elsewhere
+    // in the source, the next timeupdate must not yank them back.
+    const [followPlayhead, setFollowPlayhead] = useState(true);
+    // Bumped by the retry button to re-run the EDL load.
+    const [loadNonce, setLoadNonce] = useState(0);
 
     const videoRef = useRef(null);
     const sourceRef = useRef(null);
@@ -195,12 +201,28 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
             }
         })();
         return () => { cancelled = true; };
-    }, [jobId, clipIndex]);
+    }, [jobId, clipIndex, loadNonce]);
 
-    const words = useMemo(() => (edl?.words || []), [edl]);
+    // Normalised once so every consumer can trust it: sorted by start (the
+    // binary search below silently returns garbage on an unsorted array, and
+    // "recut sorts it" is a remote promise, not a local fact), numeric s/e,
+    // words with a missing or non-finite end collapsed to zero length at
+    // their start (still seekable and clickable; the transcript simply never
+    // claims a duration it was not given), and words without a usable start
+    // dropped outright rather than rendered as NaN buttons.
+    const words = useMemo(() => {
+        const list = (edl?.words || [])
+            .map((w) => ({ ...w, s: Number(w.s), e: Number(w.e) }))
+            .filter((w) => Number.isFinite(w.s))
+            .map((w) => (Number.isFinite(w.e) ? w : { ...w, e: w.s }));
+        list.sort((a, b) => a.s - b.s);
+        return list;
+    }, [edl]);
     const sourceAvailable = !!edl?.source?.available;
     const sourceDuration = edl?.source?.duration || 0;
-    const canonical = useMemo(() => edl?.canonical_range || { start: 0, end: 0 }, [edl]);
+    // Memoised: a fresh fallback literal here would change identity every render
+    // and defeat the useCallback that consumes it as a dependency.
+    const canonical = useMemo(() => (edl?.canonical_range || { start: 0, end: 0 }), [edl]);
     const limits = edl?.limits || { max_segments: 12, min_segment_seconds: MIN_SEGMENT_SECONDS, max_total_seconds: 180 };
     const minSeg = limits.min_segment_seconds || MIN_SEGMENT_SECONDS;
 
@@ -927,16 +949,21 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
     }, []);
 
     // Two scrollers, one policy, so they cannot fight: picking a segment jumps
-    // to it, and anything that moves the monitor (playback, a track drag, a
-    // seek) takes over from there. Deliberately NOT keyed on the segment's
+    // to it (that is a deliberate navigation, always allowed), and anything
+    // that moves the monitor (playback, a track drag, a seek) follows only
+    // while follow-playhead is on. Deliberately NOT keyed on the segment's
     // start, which changes every frame of a drag.
     useEffect(() => {
         scrollTranscriptTo('[data-anchor="1"]');
     }, [selected, words.length, scrollTranscriptTo]);
 
+    // Turning follow back ON also lands here (followPlayhead is a dependency),
+    // so the view snaps to wherever the playhead is now instead of waiting for
+    // the next word to light.
     useEffect(() => {
+        if (!followPlayhead) return;
         scrollTranscriptTo('[data-active="1"]');
-    }, [activeWordIndex, scrollTranscriptTo]);
+    }, [activeWordIndex, followPlayhead, scrollTranscriptTo]);
 
     // Stable identity keeps every untouched chunk out of the re-render.
     const pickWord = useCallback((w) => {
@@ -951,7 +978,16 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
                 <div className="card p-6 max-w-md" onMouseDown={(e) => e.stopPropagation()}>
                     <p className="eyebrow mb-2">EDITOR · CLIP {clipIndex + 1}</p>
                     <div className="flex items-center gap-2 text-danger text-sm"><AlertCircle size={16} /> {loadError}</div>
-                    <button className="btn-ghost mt-5" onClick={onClose}>close</button>
+                    <p className="text-xs text-muted lowercase mt-2">the clip recipe (GET /api/clip/{jobId}/{clipIndex}/edl) could not be loaded. retry, or close and check the job status in the gallery.</p>
+                    <div className="flex items-center gap-2 mt-5">
+                        <button className="btn-ghost" onClick={onClose}>close</button>
+                        <button
+                            className="btn-primary"
+                            onClick={() => { setLoadError(null); setLoadNonce((n) => n + 1); }}
+                        >
+                            retry
+                        </button>
+                    </div>
                 </div>
             </div>
         );
@@ -989,7 +1025,7 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
             <div className="flex items-center justify-between mb-1.5 gap-3">
                 <p className="readout">
                     SOURCE · {fmt(sourceDuration)}{edl.source.duration_estimated ? ' (EST.)' : ''}
-                    {!sourceAvailable && ' · EXPIRED — TRIMS LIMITED TO THE ORIGINAL RANGE'}
+                    {!sourceAvailable && ' · EXPIRED (TRIMS LIMITED TO THE ORIGINAL RANGE)'}
                 </p>
                 {sourceAvailable && (
                     <p className="readout hidden xl:block truncate">
@@ -1027,7 +1063,7 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
                             minWidth: '14px',
                             background: SEGMENT_COLORS[i % SEGMENT_COLORS.length],
                         }}
-                        title={`#${i + 1} · ${fmt(seg.start)} → ${fmt(seg.end)} — drag to move, edges to trim`}
+                        title={`#${i + 1} · ${fmt(seg.start)} → ${fmt(seg.end)}, drag to move, edges to trim`}
                     >
                         {/* Capped at a third each so the middle stays grabbable
                             however narrow the block gets. */}
@@ -1092,7 +1128,7 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
             <div className="px-4 sm:px-6 pt-4 pb-3 border-b border-rule flex items-start justify-between gap-4 shrink-0">
                 <div className="min-w-0">
                     <p className="eyebrow mb-1">EDITOR · CLIP {clipIndex + 1}</p>
-                    <h2 className="font-display lowercase text-2xl text-ink truncate">edit clip</h2>
+                    <h2 className="font-display font-medium lowercase text-2xl text-ink truncate">edit clip</h2>
                     {clipTitle && <p className="text-xs text-muted truncate mt-0.5">{clipTitle}</p>}
                 </div>
                 <div className="flex items-center gap-3 shrink-0">
@@ -1173,8 +1209,8 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
                                     <ChevronsLeft size={12} /> out <span className="text-muted">o</span>
                                 </button>
                                 <p className={`readout px-1 truncate ${markRange ? 'text-ink' : ''}`}>
-                                    {markIn === null ? '—:——' : fmt(markIn)}
-                                    {' → '}{markOut === null ? '—:——' : fmt(markOut)}
+                                    {markIn === null ? '–:––' : fmt(markIn)}
+                                    {' → '}{markOut === null ? '–:––' : fmt(markOut)}
                                     {markRange && ` · ${fmt(markRange.end - markRange.start)}`}
                                     {markIn !== null && markOut !== null && !markRange
                                         && ` · UNDER ${minSeg}S`}
@@ -1212,10 +1248,27 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
                             </div>
                         </div>
 
-                        {/* transcript of the whole source */}
-                        <div className="shrink-0 h-[30%] min-h-[9rem] flex flex-col">
+                        {/* transcript of the whole source. Height: 30% of the
+                            column, but bounded both ways — the floor keeps it
+                            usable on short viewports, the ceiling stops it from
+                            swallowing the monitor on tall ones. */}
+                        <div className="shrink-0 h-[30%] min-h-[10rem] max-h-[24rem] flex flex-col">
                             <div className="flex items-center justify-between mb-1.5 gap-2 shrink-0">
-                                <p className="eyebrow">Transcript · full source</p>
+                                <div className="flex items-center gap-2 min-w-0">
+                                    <p className="eyebrow">Transcript · full source</p>
+                                    {words.length > 0 && (
+                                        <button
+                                            onClick={() => setFollowPlayhead((v) => !v)}
+                                            aria-pressed={followPlayhead}
+                                            title={followPlayhead
+                                                ? 'the transcript keeps the active word centred. turn off to scroll freely while the monitor plays.'
+                                                : 'the transcript stays where you scroll it. turn on to follow the playhead again.'}
+                                            className={`btn-quiet text-[10.5px] py-0.5 px-2 shrink-0 ${followPlayhead ? 'text-ink' : 'text-muted'}`}
+                                        >
+                                            follow playhead
+                                        </button>
+                                    )}
+                                </div>
                                 {/* Boundary actions live HERE, above the words they
                                     act on, because this is where the eye is when
                                     picking a cut point from the text (issue #73). */}
@@ -1241,11 +1294,16 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
                                 ) : null}
                             </div>
                             {words.length === 0 ? (
-                                <p className="text-xs text-muted lowercase">this job kept no transcript</p>
+                                <p className="text-[13px] text-muted lowercase leading-relaxed">
+                                    this job kept no transcript, so there are no words to click and no word-snapping. trim by dragging the track edges instead.
+                                </p>
                             ) : (
                                 <div
                                     ref={transcriptRef}
-                                    className="relative flex-1 min-h-0 flex flex-wrap content-start gap-x-1 gap-y-1.5 overflow-y-auto custom-scrollbar pr-1"
+                                    tabIndex={0}
+                                    role="region"
+                                    aria-label="transcript, full source, scrollable"
+                                    className="relative flex-1 min-h-0 flex flex-wrap content-start gap-x-1 gap-y-2 overflow-y-auto custom-scrollbar pr-1"
                                 >
                                     {chunks.map((c) => {
                                         const first = c.items[0].s;
@@ -1438,7 +1496,7 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
                                             <button className="p-1 rounded-input text-muted hover:text-danger hover:bg-paper disabled:opacity-45 ml-auto" disabled={segments.length <= 1} onClick={(e) => { e.stopPropagation(); deleteSegment(i); }} aria-label="delete segment"><Trash2 size={13} /></button>
                                         </div>
                                         {outOfRange(seg) && (
-                                            <p className="text-[11px] text-danger mt-1.5 lowercase">outside the original range — the source video is gone</p>
+                                            <p className="text-[11px] text-danger mt-1.5 lowercase">outside the original range, the source video is gone</p>
                                         )}
                                     </div>
                                 ))}
@@ -1582,13 +1640,16 @@ const TranscriptChunk = React.memo(function TranscriptChunk({
                 const isActive = i === active;
                 const isSel = i === selectedAt;
                 return (
+                    // Keyed on the absolute index, not `${w.s}-…`: two words can
+                    // share a start second (overlapping ASR output does this), and
+                    // equal keys made React drop one of them from the row.
                     <button
-                        key={`${w.s}-${offset + i}`}
+                        key={offset + i}
                         data-anchor={i === anchorAt ? '1' : undefined}
                         data-active={isActive ? '1' : undefined}
                         onClick={() => onPick(w)}
                         title={`${fmt(w.s)} – ${fmt(w.e)}`}
-                        className={`px-1 py-0.5 rounded text-xs transition-colors ${
+                        className={`px-1 py-0.5 rounded text-[13px] leading-relaxed transition-colors ${
                             isSel ? 'bg-brass text-brassink'
                                 : isActive ? 'bg-brass/30 text-ink'
                                     : inside ? 'text-ink hover:bg-paper3'

@@ -1,17 +1,13 @@
-import React, { useState, useEffect, lazy, Suspense, memo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
-// Per-card modals open on click only: split them so the results grid (N cards
-// x 4 modals) does not multiply the initial bundle. Each Suspense resolves on
-// first open; the isOpen prop keeps the closed modal unmounted until then.
-const SubtitleModal = lazy(() => import('./SubtitleModal'));
-const HookModal = lazy(() => import('./HookModal'));
-const TranslateModal = lazy(() => import('./TranslateModal'));
-const WatermarkModal = lazy(() => import('./WatermarkModal'));
+import SubtitleModal from './SubtitleModal';
+import HookModal from './HookModal';
+import TranslateModal from './TranslateModal';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
-import { watermarkNoticeDismissed } from '../lib/watermark';
+import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
@@ -39,7 +35,7 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default memo(function ResultCard({ clip, index, jobId, durableUrl, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
+export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
     const [showModal, setShowModal] = useState(false);
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
@@ -211,7 +207,8 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                 });
             }
         }
-    }, [showModal, clip, knownConnections, connectedPlatforms]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- preselect once per modal/clip change; connection refreshes must not overwrite what the user picked
+    }, [showModal, clip]);
 
     const handleAutoEdit = async () => {
         setIsEditing(true);
@@ -277,7 +274,7 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                 try {
                     const jsonErr = JSON.parse(errText);
                     throw new Error(jsonErr.detail || errText);
-                } catch {
+                } catch (e) {
                     throw new Error(errText);
                 }
             }
@@ -382,7 +379,7 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                     bg_color: options.bgColor,
                     bg_opacity: options.bgOpacity,
                     style: options.style || 'classic',
-                    highlight_color: options.highlightColor || '#3B5BFF',
+                    highlight_color: options.highlightColor || '#FFD700',
                     effect: options.effect || 'none',
                     base_opacity: options.baseOpacity ?? 1.0,
                     uppercase: options.uppercase || false,
@@ -637,7 +634,7 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                 try {
                     const jsonErr = JSON.parse(errText);
                     throw new Error(jsonErr.detail || errText);
-                } catch {
+                } catch (e) {
                     throw new Error(errText);
                 }
             }
@@ -923,7 +920,7 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                 {noAccountsConnected && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-warn bg-[color-mix(in_oklab,var(--color-warn)_10%,transparent)] flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div className="lowercase">no social accounts connected yet — link tiktok, instagram or youtube to publish this clip.</div>
+                        <div className="lowercase">no social accounts connected yet, link tiktok, instagram or youtube to publish this clip.</div>
                     </div>
                 )}
 
@@ -935,7 +932,7 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-ink2 bg-paper3 flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0 text-brass" />
                         <div className="lowercase">
-                            tiktok arrives as a <b className="text-ink">draft</b>, not a live post — you'll
+                            tiktok arrives as a <b className="text-ink">draft</b>, not a live post, and you'll
                             get a notification in the app. finishing it there lets you add trending
                             sounds, effects and hashtags, which reaches more people than posting
                             straight from an api.
@@ -1019,14 +1016,13 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                 </div>
             </Modal>
 
-            <Suspense fallback={null}>
             <SubtitleModal
                 isOpen={showSubtitleModal}
                 onClose={() => setShowSubtitleModal(false)}
                 onGenerate={handleSubtitle}
                 onApplyAll={onBulkSubtitle ? async (options) => {
-                    const summary = await onBulkSubtitle(options);
-                    if (!summary || summary.errors === 0) setShowSubtitleModal(false);
+                    await onBulkSubtitle(options);
+                    setShowSubtitleModal(false);
                 } : undefined}
                 onRemove={handleRemoveSubtitles}
                 bulkCount={clipCount}
@@ -1035,7 +1031,6 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                 videoUrl={originalVideoUrl}
                 jobId={jobId}
                 clipIndex={index}
-                existingSubtitle={clip.subtitle_style}
                 existingHook={activeLayers.hook}
             />
 
@@ -1062,17 +1057,14 @@ export default memo(function ResultCard({ clip, index, jobId, durableUrl, upload
                 videoUrl={currentVideoUrl}
                 hasApiKey={!!elevenLabsKey}
             />
-            </Suspense>
 
             {showWatermarkModal && (
-                <Suspense fallback={null}>
                 <WatermarkModal
                     onClose={() => setShowWatermarkModal(false)}
                     onContinue={downloadClip}
                 />
-                </Suspense>
             )}
 
         </div>
     );
-})
+}

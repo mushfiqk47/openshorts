@@ -139,7 +139,7 @@ def _probe_hwaccel():
     """
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-hwaccel", "cuda",
+        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
         "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
         "-f", "null", "-",
     ]
@@ -173,7 +173,17 @@ def hwaccel_available():
 
 
 def hwaccel_decode_args():
-    """Return ffmpeg input args for GPU decode when available, else []."""
+    """Return ffmpeg input args for GPU decode when available, else [].
+
+    Deliberately WITHOUT -hwaccel_output_format cuda: keeping decoded frames
+    in GPU memory breaks the encoder-side graph on current ffmpeg (9.x) when
+    the caller also pins -pix_fmt yuv420p, which nvenc and the x264 fallback
+    both need — the CUDA frames cannot pass through the CPU pixel-format
+    filter and every clip cut dies with AVERROR (-40, Function not
+    implemented) writing a zero-byte file. Plain -hwaccel cuda still decodes
+    on the GPU (nvdec) and hands frames to system memory, which everything
+    downstream accepts.
+    """
     if hwaccel_available():
         return ["-hwaccel", "cuda"]
     return []

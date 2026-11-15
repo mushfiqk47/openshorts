@@ -18,19 +18,12 @@ interface SubtitlesProps {
 const POSITION_MAP: Record<string, React.CSSProperties> = {
   top: { top: "12%", bottom: "auto" },
   middle: { top: "45%", bottom: "auto" },
-  // 15% matches the burn's SAFE_MARGIN_V (43/288 of frame height) so the
-  // preview sits where TikTok/Reels-safe captions actually land.
-  bottom: { bottom: "15%", top: "auto" },
+  bottom: { bottom: "10%", top: "auto" },
 };
 
 export const Subtitles: React.FC<SubtitlesProps> = ({ config }) => {
   const { fps } = useVideoConfig();
-  const blocks = groupCaptionsIntoBlocks(
-    config.captions,
-    20,
-    2000,
-    config.timeOffsetMs ?? 0
-  );
+  const blocks = groupCaptionsIntoBlocks(config.captions);
 
   return (
     <AbsoluteFill>
@@ -208,26 +201,12 @@ const WordSpan: React.FC<WordSpanProps> = ({
         };
         break;
       }
-      case "box": {
-        // Visla-style pill: white text on a saturated-blue rounded pill.
-        // The burned ASS approximates this with a thick highlight outline
-        // (server draws \bord+3 in highlight); the browser draws the true pill.
-        color = "#FFFFFF";
-        extraStyle = {
-          backgroundColor: style.highlightColor,
-          borderRadius: 8,
-          padding: "2px 10px",
-        };
-        break;
-      }
       default:
         break;
     }
   }
 
   // Text stroke via textShadow (CSS paint-order not reliable in Remotion)
-  // 8-point ring (diagonals included) so the outline reads as a smooth thin
-  // stroke instead of a blocky plus-shaped halo at preview scale.
   const strokeShadow =
     style.borderWidth > 0
       ? [
@@ -235,15 +214,9 @@ const WordSpan: React.FC<WordSpanProps> = ({
           `-${style.borderWidth}px 0 0 ${style.borderColor}`,
           `0 ${style.borderWidth}px 0 ${style.borderColor}`,
           `0 -${style.borderWidth}px 0 ${style.borderColor}`,
-          `${style.borderWidth}px ${style.borderWidth}px 0 ${style.borderColor}`,
-          `-${style.borderWidth}px ${style.borderWidth}px 0 ${style.borderColor}`,
-          `${style.borderWidth}px -${style.borderWidth}px 0 ${style.borderColor}`,
-          `-${style.borderWidth}px -${style.borderWidth}px 0 ${style.borderColor}`,
         ].join(", ")
       : "none";
 
-  // Box draws a solid highlight pill behind white text, so the dark stroke is dropped on the active word.
-  const boxActive = animation === "box" && isActive;
   return (
     <span
       style={{
@@ -253,7 +226,7 @@ const WordSpan: React.FC<WordSpanProps> = ({
         color: animation === "karaoke" && isActive ? undefined : color,
         textShadow:
           animation !== "karaoke"
-            ? [boxActive ? null : strokeShadow, extraStyle.textShadow].filter(Boolean).join(", ")
+            ? [strokeShadow, extraStyle.textShadow].filter(Boolean).join(", ")
             : strokeShadow,
         transform,
         display: "inline-block",

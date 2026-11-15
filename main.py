@@ -13,45 +13,11 @@ for _stream_name in ("stdout", "stderr"):
         except Exception:
             pass
 
-# `python main.py` with no clip args starts the API server (same as
-# `python -m uvicorn app:app`). Clip mode still uses the argparse CLI at the
-# bottom: `python main.py -i video.mp4 --transcript video.srt`.
-# This block runs BEFORE the heavy ML imports so `python main.py` boots fast.
-if __name__ == "__main__":
-    _argv = sys.argv[1:]
-    _clip_flags = {
-        "-i", "--input", "-u", "--url", "--skip-analysis",
-        "--transcript", "-o", "--output", "--format",
-        "--keep-original", "-h", "--help",
-    }
-    _has_clip_arg = any(
-        a in _clip_flags or a.startswith("--transcript=") or a.startswith("--format=")
-        for a in _argv
-    )
-    if "--serve" in _argv or not _has_clip_arg:
-        import argparse as _ap
-        _p = _ap.ArgumentParser(description="OpenShorts backend (API server).")
-        _p.add_argument("--serve", action="store_true", help="Start the API server.")
-        _p.add_argument("--host", default="0.0.0.0", help="Bind host (default 0.0.0.0).")
-        _p.add_argument("--port", type=int, default=int(__import__("os").environ.get("PORT", "8000")),
-                        help="Bind port (default $PORT or 8000).")
-        _p.add_argument("--reload", action="store_true", help="Uvicorn auto-reload (dev only).")
-        _args, _unknown = _p.parse_known_args(_argv)
-        for _s in ("stdout", "stderr"):
-            _st = getattr(sys, _s, None)
-            if _st and hasattr(_st, "reconfigure"):
-                try:
-                    _st.reconfigure(encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
-        print(f"🚀 OpenShorts API → http://localhost:{_args.port}  (docs: /docs)", flush=True)
-        print("   Tip: clip mode is still here → python main.py -i video.mp4 --transcript video.srt", flush=True)
-        __import__("uvicorn").run("app:app", host=_args.host, port=_args.port, reload=_args.reload)
-        sys.exit(0)
-
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from scenedetect import open_video, SceneManager
+from scenedetect.detectors import ContentDetector
 from ultralytics import YOLO
 import torch
 import os
@@ -59,6 +25,7 @@ import numpy as np
 from tqdm import tqdm
 import yt_dlp
 import mediapipe as mp
+# transcription lives in transcribe_backends (NeMo-Speech.cpp on CUDA)
 try:
     from google import genai
     from google.genai import types as genai_types
@@ -78,41 +45,43 @@ import json
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
 
-# LLM Provider (Ollama / OpenAI-compatible path — default)
+# OpenRouter (free model) path — optional, used when OPENROUTER_API_KEY is set
 try:
-    import llm_client
-    _HAS_LLM = True
+    import openrouter_client  # noqa: F401
+    _HAS_OPENROUTER = True
 except ImportError:
-    _HAS_LLM = False
+    _HAS_OPENROUTER = False
 
 
-def _use_llm() -> bool:
-    """True when Ollama / OpenAI-compatible LLM is preferred or configured."""
-    provider = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
-    if provider in ("gemini",):
-        return False
-    # If explicit Gemini key is passed and no LLM_BASE_URL or LLM_PROVIDER is set
-    if os.environ.get("GEMINI_API_KEY") and not os.environ.get("LLM_BASE_URL") and not provider:
-        return False
-    # Default is Ollama / OpenAI-compatible
-    return _HAS_LLM
+def _use_openrouter() -> bool:
+    """True when an OpenRouter key is configured (env or mirrored from request)."""
+    k = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or "").strip()
+    if k:
+        return True
+    # Also accept a GEMINI_API_KEY that looks like an OpenRouter key (dashboard single field)
+    g = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    return g.startswith("sk-or-v1-") or g.startswith("sk-or-")
 
 
-def _llm_config() -> tuple[str, str, str]:
-    """Returns (base_url, model, api_key)."""
-    if _HAS_LLM:
-        return llm_client.resolve_llm_config()
+def _openrouter_key() -> str:
+    k = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or "").strip()
+    if k:
+        return k
+    return (os.environ.get("GEMINI_API_KEY") or "").strip()
+
+
+def _openrouter_model() -> str:
     return (
-        os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1"),
-        os.environ.get("LLM_MODEL", "llama3.2:1b"),
-        os.environ.get("LLM_API_KEY", "ollama"),
-    )
+        os.environ.get("OPENROUTER_MODEL")
+        or os.environ.get("GEMINI_MODEL")
+        or "openrouter/free"
+    ).strip() or "openrouter/free"
 
 # Load environment variables
 load_dotenv()
 
 # --- Constants ---
-# ASPECT_RATIO lives in pipeline/tracking.py (single definition, imported below).
+ASPECT_RATIO = 9 / 16
 
 GEMINI_PROMPT_TEMPLATE = """
 You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 15 and 60 seconds long.
@@ -160,29 +129,13 @@ model = YOLO(os.environ.get("YOLO_MODEL_PATH", "yolov8n.pt"))
 # GPU-first: when CUDA is available put YOLO on the GPU (Ultralytics handles
 # device selection per call, but the initial .to() pins weights to VRAM).
 try:
-    _yolo_requested = os.environ.get("YOLO_DEVICE", "auto").strip().lower()
-    try:
+    _yolo_device = os.environ.get("YOLO_DEVICE", "auto").strip().lower()
+    if _yolo_device == "auto":
         import torch as _torch_yolo
-        _yolo_cuda_ok = bool(_torch_yolo.cuda.is_available())
-    except Exception:
-        _yolo_cuda_ok = False
-    if _yolo_requested == "auto":
-        _yolo_device = "cuda" if _yolo_cuda_ok else "cpu"
-    elif _yolo_requested in ("cuda", "0", "gpu"):
-        if _yolo_cuda_ok:
-            _yolo_device = "cuda"
-        else:
-            _yolo_device = "cpu"
-            print("[YOLO] YOLO_DEVICE=cuda requested but CUDA is not available "
-                  "(CPU-only torch?) — using CPU")
-    else:
-        _yolo_device = _yolo_requested or "cpu"
+        _yolo_device = "cuda" if _torch_yolo.cuda.is_available() else "cpu"
     if _yolo_device in ("cuda", "0", "gpu"):
-        try:
-            model.to("cuda")
-            print("🎯 [YOLO] device: cuda (GPU)")
-        except Exception as _e:
-            print(f"⚠️ [YOLO] GPU init failed ({_e}) — staying on CPU")
+        model.to("cuda")
+        print("🎯 [YOLO] device: cuda (GPU)")
     else:
         print(f"🎯 [YOLO] device: {_yolo_device}")
 except Exception as _e:
@@ -199,13 +152,269 @@ except Exception as _mp_err:  # pragma: no cover - import-time fallback
     mp_face_detection = None
     face_detection = None
 
-# JUMP_CONFIRM_FRAMES lives in pipeline/tracking.py (used by SmoothedCameraman).
+# Consecutive detections a large target move must survive before the camera
+# follows it (see SmoothedCameraman.update_target). Env-overridable so the
+# damping can be dialled back without a deploy; 1 restores the old behaviour.
+JUMP_CONFIRM_FRAMES = max(int(os.environ.get("JUMP_CONFIRM_FRAMES", "3")), 1)
 
 
-# Camera/speaker tracking lives in pipeline/tracking.py (T8a).
-from pipeline.tracking import ASPECT_RATIO, SmoothedCameraman, SpeakerTracker
+class SmoothedCameraman:
+    """
+    Handles smooth camera movement.
+    Simplified Logic: "Heavy Tripod"
+    Only moves if the subject leaves the center safe zone.
+    Moves slowly and linearly.
+    """
+    def __init__(self, output_width, output_height, video_width, video_height, aspect_ratio=ASPECT_RATIO):
+        self.output_width = output_width
+        self.output_height = output_height
+        self.video_width = video_width
+        self.video_height = video_height
+        self.aspect_ratio = aspect_ratio
 
+        # Initial State
+        self.current_center_x = video_width / 2
+        self.target_center_x = video_width / 2
 
+        # Calculate crop dimensions once
+        self.crop_height = video_height
+        self.crop_width = int(self.crop_height * aspect_ratio)
+        if self.crop_width > video_width:
+             self.crop_width = video_width
+             self.crop_height = int(self.crop_width / aspect_ratio)
+             
+        # Safe Zone: 20% of the video width
+        # As long as the target is within this zone relative to current center, DO NOT MOVE.
+        self.safe_zone_radius = self.crop_width * 0.25
+
+        # A target that teleports further than the safe zone in one detection is
+        # far more often a detector error — a second face, a false positive, a
+        # box snapping to a different body part — than a person who actually
+        # moved that far. Committing to it immediately is what made the camera
+        # swing: measured on real user footage, 22% of target updates jumped
+        # more than the entire safe zone. So a big move has to REPEAT this many
+        # times before the camera follows it; a wrong reading disappears on the
+        # next detection and never moves the frame.
+        #
+        # The cost is latency on a genuinely fast move: at DETECT_STRIDE=4 and
+        # 30fps, three confirmations is ~0.4s. That reads as an operator being
+        # unhurried, which is the look we want, and it is far cheaper than the
+        # whip-panning it replaces.
+        #
+        # Measured over 262s of TRACK footage from two real user videos
+        # (26-jul-2026), confirm=1 -> 3: in-scene reversals 0.41/s -> 0.13/s
+        # (-69%), camera travel 91px/s -> 60px/s (-34%). Per scene, 54 of 84 get
+        # calmer and 23 are unchanged — but 7 get BUSIER, up to 59 -> 108px/s,
+        # because committing later can leave the camera further to travel. Net
+        # strongly positive, not universally so.
+        self.jump_confirm_frames = JUMP_CONFIRM_FRAMES
+        self._pending_target = None
+        self._pending_count = 0
+
+    def update_target(self, face_box):
+        """Update the target centre from a detection, ignoring lone big jumps."""
+        if not face_box:
+            return
+        x, y, w, h = face_box
+        new_center = x + w / 2
+
+        if abs(new_center - self.target_center_x) > self.safe_zone_radius:
+            # Same big move as last time? Count it. Otherwise start counting
+            # afresh — two contradictory outliers must not confirm each other.
+            if (self._pending_target is not None
+                    and abs(new_center - self._pending_target) <= self.safe_zone_radius):
+                self._pending_count += 1
+            else:
+                self._pending_target = new_center
+                self._pending_count = 1
+            if self._pending_count < self.jump_confirm_frames:
+                return  # not convinced yet — hold the frame
+
+        self._pending_target = None
+        self._pending_count = 0
+        self.target_center_x = new_center
+    
+    def get_crop_box(self, force_snap=False):
+        """
+        Returns the (x1, y1, x2, y2) for the current frame.
+        """
+        if force_snap:
+            self.current_center_x = self.target_center_x
+        else:
+            diff = self.target_center_x - self.current_center_x
+            
+            # SIMPLIFIED LOGIC:
+            # 1. Is the target outside the safe zone?
+            if abs(diff) > self.safe_zone_radius:
+                # 2. If yes, move towards it slowly (Linear Speed)
+                # Determine direction
+                direction = 1 if diff > 0 else -1
+                
+                # Speed: 2 pixels per frame (Slow pan)
+                # If the distance is HUGE (scene change or fast movement), speed up slightly
+                if abs(diff) > self.crop_width * 0.5:
+                    speed = 15.0 # Fast re-frame
+                else:
+                    speed = 3.0  # Slow, steady pan
+                
+                self.current_center_x += direction * speed
+                
+                # Check if we overshot (prevent oscillation)
+                new_diff = self.target_center_x - self.current_center_x
+                if (direction == 1 and new_diff < 0) or (direction == -1 and new_diff > 0):
+                    self.current_center_x = self.target_center_x
+            
+            # If inside safe zone, DO NOTHING (Stationary Camera)
+                
+        # Clamp center
+        half_crop = self.crop_width / 2
+        
+        if self.current_center_x - half_crop < 0:
+            self.current_center_x = half_crop
+        if self.current_center_x + half_crop > self.video_width:
+            self.current_center_x = self.video_width - half_crop
+            
+        x1 = int(self.current_center_x - half_crop)
+        x2 = int(self.current_center_x + half_crop)
+        
+        x1 = max(0, x1)
+        x2 = min(self.video_width, x2)
+        
+        y1 = 0
+        y2 = self.video_height
+        
+        return x1, y1, x2, y2
+
+class SpeakerTracker:
+    """
+    Tracks speakers over time to prevent rapid switching and handle temporary obstructions.
+    """
+    def __init__(self, stabilization_frames=15, cooldown_frames=30):
+        self.active_speaker_id = None
+        self.speaker_scores = {}  # {id: score}
+        self.last_seen = {}       # {id: frame_number}
+        self.locked_counter = 0   # How long we've been locked on current speaker
+        
+        # Hyperparameters
+        self.stabilization_threshold = stabilization_frames # Frames needed to confirm a new speaker
+        self.switch_cooldown = cooldown_frames              # Minimum frames before switching again
+        self.last_switch_frame = -1000
+        
+        # ID tracking
+        self.next_id = 0
+        self.known_faces = [] # [{'id': 0, 'center': x, 'last_frame': 123}]
+
+    def get_target(self, face_candidates, frame_number, width):
+        """
+        Decides which face to focus on.
+        face_candidates: list of {'box': [x,y,w,h], 'score': float}
+        """
+        current_candidates = []
+        
+        # 1. Match faces to known IDs (simple distance tracking)
+        for face in face_candidates:
+            x, y, w, h = face['box']
+            center_x = x + w / 2
+            
+            best_match_id = -1
+            min_dist = width * 0.15 # Reduced matching radius to avoid jumping in groups
+            
+            # Try to match with known faces seen recently
+            for kf in self.known_faces:
+                if frame_number - kf['last_frame'] > 30: # Forgot faces older than 1s (was 2s)
+                    continue
+                    
+                dist = abs(center_x - kf['center'])
+                if dist < min_dist:
+                    min_dist = dist
+                    best_match_id = kf['id']
+            
+            # If no match, assign new ID
+            if best_match_id == -1:
+                best_match_id = self.next_id
+                self.next_id += 1
+            
+            # Update known face
+            self.known_faces = [kf for kf in self.known_faces if kf['id'] != best_match_id]
+            self.known_faces.append({'id': best_match_id, 'center': center_x, 'last_frame': frame_number})
+            
+            current_candidates.append({
+                'id': best_match_id,
+                'box': face['box'],
+                'score': face['score']
+            })
+
+        # 2. Update Scores with decay
+        for pid in list(self.speaker_scores.keys()):
+             self.speaker_scores[pid] *= 0.85 # Faster decay (was 0.9)
+             if self.speaker_scores[pid] < 0.1:
+                 del self.speaker_scores[pid]
+
+        # Add new scores
+        for cand in current_candidates:
+            pid = cand['id']
+            # Score is purely based on size (proximity) now that we don't have mouth
+            raw_score = cand['score'] / (width * width * 0.05)
+            self.speaker_scores[pid] = self.speaker_scores.get(pid, 0) + raw_score
+
+        # 3. Determine Best Speaker
+        if not current_candidates:
+            # If no one found, maintain last active speaker if cooldown allows
+            # to avoid black screen or jump to 0,0
+            return None 
+            
+        best_candidate = None
+        max_score = -1
+        
+        for cand in current_candidates:
+            pid = cand['id']
+            total_score = self.speaker_scores.get(pid, 0)
+            
+            # Hysteresis: HUGE Bonus for current active speaker
+            if pid == self.active_speaker_id:
+                total_score *= 3.0 # Sticky factor
+                
+            if total_score > max_score:
+                max_score = total_score
+                best_candidate = cand
+
+        # 4. Decide Switch
+        if best_candidate:
+            target_id = best_candidate['id']
+            
+            if target_id == self.active_speaker_id:
+                self.locked_counter += 1
+                return best_candidate['box']
+            
+            # New person. The cooldown must hold whether or not the current
+            # speaker happens to be detected in THIS frame.
+            #
+            # It used to fall through and switch when the active speaker was
+            # missing from the candidate list — a blink, a head turn or one
+            # motion-blurred frame was enough. That is precisely when the
+            # cooldown is needed, so it only ever fired when it wasn't: 3 of 7
+            # target switches measured on a 12s clip (25-jul-2026) jumped the
+            # cooldown this way, and every jump drags the camera across frame.
+            #
+            # Returning None holds instead: the caller only calls
+            # update_target() on a truthy box, so the camera keeps its current
+            # target and finishes whatever move it was making. The hold is
+            # bounded by the cooldown itself — once it expires, a speaker who
+            # really did leave the shot is switched away from normally.
+            if frame_number - self.last_switch_frame < self.switch_cooldown:
+                old_cand = next((c for c in current_candidates if c['id'] == self.active_speaker_id), None)
+                return old_cand['box'] if old_cand else None
+
+            self.active_speaker_id = target_id
+            self.last_switch_frame = frame_number
+            self.locked_counter = 0
+            return best_candidate['box']
+            
+        return None
+
+# Detectors never need full-resolution frames: MediaPipe returns relative
+# coords and YOLO boxes are scaled back up. Running them on a ≤640px copy cuts
+# per-frame preprocessing cost hard, which is what dominates CPU-only renders.
 DETECT_MAX_WIDTH = 640
 # The global MediaPipe graph and YOLO model are NOT thread-safe; clips render
 # in parallel, so every inference goes through this lock. Contention is small
@@ -463,7 +672,7 @@ def truncate_bytes(text, max_bytes):
 
 def sanitize_filename(filename):
     """Remove invalid characters from filename and bound it for the filesystem."""
-    filename = re.sub(r'[<>:"/\\|?*#\x00-\x1f\uff5c]', '', filename)
+    filename = re.sub(r'[<>:"/\\|?*#]', '', filename)
     filename = filename.replace(' ', '_')
     return truncate_bytes(filename, MAX_TITLE_BYTES)
 
@@ -714,7 +923,7 @@ def finalize_clip_passthrough(input_video, final_output_video):
     return True
 
 
-def auto_caption_clip(clip_path, transcript, clip_start, clip_end, style_override=None):
+def auto_caption_clip(clip_path, transcript, clip_start, clip_end):
     """Burn the default caption style onto a finished clip.
 
     Captions are mandatory for short-form to land, but they were opt-in behind a
@@ -736,7 +945,9 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, style_overrid
         return None  # silent video: nothing to caption
     try:
         import subtitles as _subs
-        style = {**_subs.AUTO_CAPTION_STYLE, **(style_override or {})}
+        # Copy so the env-tunable font size never mutates the module constant.
+        style = dict(_subs.AUTO_CAPTION_STYLE)
+        style["font_size"] = _subs.default_font_size()
         output_dir = os.path.dirname(clip_path)
         stem = os.path.basename(clip_path)
         generation_id = int(time.time())
@@ -769,7 +980,6 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, style_overrid
         if not _subs.generate_ass(
                 transcript, clip_start, clip_end, ass_path,
                 max_chars=style["max_chars"], max_duration=style["max_duration"],
-                max_words=style.get("max_words", 3),
                 alignment=style["alignment"], fontsize=style["font_size"],
                 font_name=style["font_name"], font_color=style["font_color"],
                 border_color=style["border_color"], border_width=style["border_width"],
@@ -1118,11 +1328,25 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
 
     return True
 
+def transcribe_video(video_path):
+    print("🎙️  Transcribing video...")
+    from transcribe_backends import transcribe_media
+
+    transcript = transcribe_media(video_path)
+
+    print(f"   Detected language '{transcript['language']}', "
+          f"{len(transcript['segments'])} segments")
+    for segment in transcript['segments']:
+        # Print progress to keep user informed (and prevent timeouts feeling)
+        print(f"   [{segment['start']:.2f}s -> {segment['end']:.2f}s] {segment['text']}")
+
+    return transcript
+
 def _run_gemini_stage(client, model_name, prompt, schema):
     """One schema-enforced Gemini call with transient-error backoff.
     Returns (parsed_dict, cost_analysis)."""
     if genai_types is None or client is None:
-        raise RuntimeError("google-genai not installed — install google-genai or use Ollama / OpenAI-compatible LLM")
+        raise RuntimeError("google-genai not installed — install google-genai or use OpenRouter")
     config = genai_types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
@@ -1162,14 +1386,36 @@ def _run_gemini_stage(client, model_name, prompt, schema):
             time.sleep(wait)
 
 
-def _run_llm_stage(prompt: str, mode: str) -> tuple[dict, dict | None]:
-    """One LLM call — score or detail — returning (parsed, cost)."""
-    import llm_client
+def _ai_provider() -> str:
+    """Which service runs the clip-selection stages: custom | ollama |
+    openrouter | gemini. AI_PROVIDER pins the choice explicitly; 'auto'
+    resolves to OpenRouter when a key is configured (env or mirrored from
+    request), else Gemini. 'custom' needs AI_BASE_URL + AI_MODEL and can point
+    at any OpenAI-compatible endpoint (tunnel, vLLM, llama.cpp server).
+    """
+    p = (os.environ.get("AI_PROVIDER") or "").strip().lower()
+    if p in ("custom", "ollama", "openrouter", "gemini"):
+        return p
+    return "openrouter" if _use_openrouter() else "gemini"
 
-    base_url, model, key = _llm_config()
+
+def _run_ai_stage(prompt: str, mode: str) -> tuple[dict, dict | None]:
+    """One AI call — score or detail — returning (parsed, cost)."""
     # score = precise (0.2), detail = creative (0.7)
     temp = 0.2 if mode == "score" else 0.7
-    parsed, cost = llm_client.call_llm(prompt, base_url=base_url, api_key=key, model=model, temperature=temp)
+    if _ai_provider() == "custom":
+        import custom_client
+        return custom_client.call_custom(prompt, temperature=temp)
+    if _ai_provider() == "ollama":
+        import ollama_client
+        return ollama_client.call_ollama(prompt, temperature=temp)
+    import openrouter_client
+
+    key = _openrouter_key()
+    model = _openrouter_model()
+    if not key:
+        raise RuntimeError("OPENROUTER_API_KEY not set")
+    parsed, cost = openrouter_client.call_openrouter(prompt, api_key=key, model=model, temperature=temp)
     return parsed, cost
 
 
@@ -1181,34 +1427,47 @@ def get_viral_clips(transcript_result, video_duration):
     the expensive detail reasoning focused on the shortlist. Cuts are snapped to
     word boundaries so clips don't start/end mid-word.
 
-    Routes through Ollama (default at http://localhost:11434/v1) or any OpenAI-compatible
-    endpoint; otherwise uses Gemini if configured. The same prompts and snapping are used
-    either way so results stay comparable.
+    Routes through Ollama when AI_PROVIDER=ollama, OpenRouter when
+    OPENROUTER_API_KEY (or an sk-or-* Gemini key) is present; otherwise uses
+    Gemini. The same prompts and snapping are used either way so results stay
+    comparable.
     """
-    use_llm = _use_llm()
-    if use_llm:
-        base_url, model_name, api_key = _llm_config()
-        provider = "Ollama" if ("11434" in base_url or os.environ.get("LLM_PROVIDER") == "ollama") else "OpenAI-Compatible"
+    provider_kind = _ai_provider()
+    use_or = provider_kind == "openrouter"
+    client = None
+    if provider_kind == "custom":
+        import custom_client
+        api_key = None
+        model_name = custom_client.ai_model()
+        provider = f"custom ({model_name})"
+        print(f"🤖 Using custom endpoint {custom_client.ai_base_url()} — set AI_MODEL to change it.")
+    elif provider_kind == "ollama":
+        import ollama_client
+        api_key = None
+        model_name = ollama_client.ollama_model()
+        provider = f"Ollama {model_name}"
+        print(f"🤖 Using Ollama (local) — set OLLAMA_MODEL to change it.")
+    elif use_or:
+        api_key = _openrouter_key()
+        model_name = _openrouter_model()
+        provider = "OpenRouter"
+        print(f"🤖 Using OpenRouter (free model path) — set OPENROUTER_MODEL to change it.")
     else:
-        base_url = ""
         api_key = os.getenv("GEMINI_API_KEY")
         model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
         provider = "Gemini"
-    if not use_llm and not api_key:
-        print("❌ Error: No AI API key found. Configure Ollama (http://localhost:11434/v1) or set GEMINI_API_KEY.")
+    if provider_kind not in ("ollama", "custom") and not api_key:
+        print("❌ Error: No AI API key found. Set OPENROUTER_API_KEY (sk-or-...) for free models or GEMINI_API_KEY.")
         return None
 
-    if not use_llm:
+    if provider_kind == "gemini":
         if genai is None:
-            print("❌ google-genai not installed. pip install google-genai or use Ollama / OpenAI-compatible LLM.")
+            print("❌ google-genai not installed. pip install google-genai or set OPENROUTER_API_KEY")
             return None
         client = genai.Client(api_key=api_key)
-    else:
-        client = None
-        print(f"🤖 Using {provider} ({base_url}) — model: {model_name}")
     language = str(transcript_result.get('language') or 'unknown')
-    print(f"🤖 Analyzing with {provider} (2-pass: score → detail)...")
-    print(f"🤖  Model: {model_name} | language: {language} | provider: {provider.lower()}")
+    print(f"\U0001f916 Analyzing with {provider} (2-pass: score → detail)...")
+    print(f"\U0001f916  Model: {model_name} | language: {language} | provider: {provider_kind}")
 
     # Full word list — ground truth for snapping cut points.
     words = []
@@ -1237,8 +1496,8 @@ def get_viral_clips(transcript_result, video_duration):
             prompt = gemini_worker.SCORE_PROMPT_TEMPLATE.format(
                 video_duration=video_duration, language=language,
                 windows_json=json.dumps(payload, ensure_ascii=False))
-            if use_llm:
-                parsed, cost = _run_llm_stage(prompt, "score")
+            if use_or or provider_kind in ("ollama", "custom"):
+                parsed, cost = _run_ai_stage(prompt, "score")
             else:
                 parsed, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.ScoreResponse)
             if cost:
@@ -1263,8 +1522,8 @@ def get_viral_clips(transcript_result, video_duration):
             min_clips=min_clips, max_clips=max_clips,
             min_secs=min_secs, max_secs=max_secs,
             windows_json=json.dumps(payload, ensure_ascii=False))
-        if use_llm:
-            detail, cost = _run_llm_stage(prompt, "detail")
+        if use_or or provider_kind in ("ollama", "custom"):
+            detail, cost = _run_ai_stage(prompt, "detail")
         else:
             detail, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.DetailResponse)
         if cost:
@@ -1313,12 +1572,12 @@ def get_visual_clips(video_path, video_duration, language="en"):
     most engaging visual moments (no transcript). Returns the same
     {"shorts", "cost_analysis"} shape as get_viral_clips, or None.
 
-    When using local Ollama or OpenAI-compatible LLMs (text-only), vision is not available,
+    When OpenRouter is configured, vision is not available (no video upload),
     so this path returns None and the caller falls back to a hard error with a
     helpful message.
     """
-    if _use_llm():
-        print("🎥  Silent video — vision analysis requires Gemini (local LLM vision video upload not yet wired).")
+    if _use_openrouter():
+        print("🎥  Silent video — vision analysis requires Gemini (OpenRouter vision not yet wired).")
         print("   Tip: add speech/audio to the video or set a GEMINI_API_KEY for silent clips.")
         return None
     print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
@@ -1417,8 +1676,8 @@ if __name__ == '__main__':
     parser.add_argument('--skip-analysis', action='store_true', help="Skip AI analysis and convert the whole video.")
     parser.add_argument('--format', type=str, default="auto", choices=["auto", "vertical", "horizontal", "square"],
                         help="Output aspect: vertical/auto (9:16), horizontal (keep 16:9), square (1:1).")
-    parser.add_argument('--transcript', type=str, required=False,
-                        help="Path to the transcript: .srt / .vtt / .txt / .md / .json. REQUIRED unless --skip-analysis. No auto-transcription.")
+    parser.add_argument('--transcript', type=str,
+                        help="Path to a precomputed transcript JSON (transcribe_media shape); skips transcription.")
 
     args = parser.parse_args()
     output_format = args.format
@@ -1449,7 +1708,7 @@ if __name__ == '__main__':
         input_video, video_title = download_youtube_video(args.url, output_dir)
     else:
         input_video = args.input
-        video_title = sanitize_filename(os.path.splitext(os.path.basename(input_video))[0])
+        video_title = os.path.splitext(os.path.basename(input_video))[0]
         
         if args.output and not args.skip_analysis:
             # For multi-clip runs, treat --output as an OUTPUT DIRECTORY (create it if needed).
@@ -1494,24 +1753,29 @@ if __name__ == '__main__':
         duration = frame_count / fps
         cap.release()
 
-        # 3. Transcript (user-supplied — Whisper removed). SRT/VTT carry real
-        # cue timestamps; TXT/MD words are spread evenly across the duration.
-        # Silent / music-only videos with no transcript use Gemini vision.
-        from transcript_input import load_transcript
+        # 3. Transcribe — unless the video has no audio, in which case fall back
+        # to Gemini vision (picks clips from the imagery instead of the speech).
+        from transcribe_backends import NoAudioError
         transcript = None
+        # Module handover (issue #68): another module already transcribed this
+        # exact source with the same backend, so reuse its output. Any problem
+        # with the file falls back to transcribing normally rather than failing.
         if args.transcript:
             try:
-                transcript = load_transcript(args.transcript, duration)
-                print(f"⏩ Transcript loaded "
-                      f"({len(transcript['segments'])} segments) from {args.transcript}.")
-            except (FileNotFoundError, ValueError) as e:
-                print(f"❌ {e}")
-                exit(1)
-        elif not args.skip_analysis:
-            print("❌ No transcript provided. Whisper auto-transcription was removed —")
-            print("   run with --transcript video.srt (or .vtt / .txt / .md / .json).")
-            print("   Example: python main.py -i video.mp4 --transcript video.srt")
-            exit(1)
+                with open(args.transcript, 'r') as f:
+                    transcript = json.load(f)
+                if not transcript.get('segments'):
+                    raise ValueError("transcript has no segments")
+                print(f"⏩ Reusing precomputed transcript "
+                      f"({len(transcript['segments'])} segments) — skipping transcription.")
+            except Exception as e:
+                print(f"⚠️ Could not use precomputed transcript ({e}) — transcribing normally.")
+                transcript = None
+        if transcript is None:
+            try:
+                transcript = transcribe_video(input_video)
+            except NoAudioError as e:
+                print(f"🔇 {e} — switching to visual analysis.")
 
         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
         if transcript is not None:
@@ -1567,12 +1831,15 @@ if __name__ == '__main__':
                         *audio_encode_args(),
                         clip_temp_path
                     ]
-                    cut_res = subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                    if cut_res.returncode != 0:
-                        err = cut_res.stderr.decode('utf-8', errors='replace')[-400:].strip()
-                        raise RuntimeError(f"ffmpeg cut failed (code {cut_res.returncode}): {err}")
-                    if not os.path.exists(clip_temp_path) or os.path.getsize(clip_temp_path) == 0:
-                        raise RuntimeError(f"ffmpeg cut produced empty file: {clip_temp_path}")
+                    cut = subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    # An unchecked cut used to cascade into cryptic
+                    # TransNetV2/OpenCV errors on a zero-byte temp file; fail
+                    # here instead, with ffmpeg's own words.
+                    if cut.returncode != 0 or not os.path.exists(clip_temp_path) \
+                            or os.path.getsize(clip_temp_path) == 0:
+                        tail = (cut.stderr or b'').decode(errors='replace').strip()[-400:]
+                        raise RuntimeError(
+                            f"ffmpeg cut failed (exit {cut.returncode}): {tail or 'no output written'}")
 
                     success = render_clip(clip_temp_path, clip_final_path, output_format)
                     # Layer order: watermark burns into the canonical (so any
@@ -1617,7 +1884,7 @@ if __name__ == '__main__':
     # Clean up original if requested
     if args.url and not args.keep_original and os.path.exists(input_video):
         os.remove(input_video)
-        print("🗑️  Cleaned up downloaded video.")
+        print(f"🗑️  Cleaned up downloaded video.")
 
     total_time = time.time() - script_start_time
     print(f"\n⏱️  Total execution time: {total_time:.2f}s")

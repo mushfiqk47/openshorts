@@ -8,7 +8,7 @@ export interface CaptionWord {
 }
 
 // --- Subtitle config ---
-export type SubtitleAnimation = "none" | "word-highlight" | "pop" | "karaoke" | "box";
+export type SubtitleAnimation = "none" | "word-highlight" | "pop" | "karaoke";
 export type SubtitlePosition = "top" | "middle" | "bottom";
 
 export interface SubtitleStyle {
@@ -29,9 +29,6 @@ export interface SubtitleStyle {
 export interface SubtitleConfig {
   captions: CaptionWord[];
   position: SubtitlePosition;
-  // Manual sync nudge in milliseconds (positive = captions later).
-  // Mirrors the server burn's time_offset so preview shows final timing.
-  timeOffsetMs?: number;
   style: SubtitleStyle;
 }
 
@@ -100,7 +97,7 @@ export const subtitleStyleSchema = z.object({
   borderWidth: z.number(),
   bgColor: z.string(),
   bgOpacity: z.number().min(0).max(1),
-  animation: z.enum(["none", "word-highlight", "pop", "karaoke", "box"]),
+  animation: z.enum(["none", "word-highlight", "pop", "karaoke"]),
 });
 
 export const subtitleConfigSchema = z.object({

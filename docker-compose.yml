@@ -2,10 +2,13 @@ services:
   backend:
     build:
       context: .
-      # GPU image (needs NVIDIA Docker support): GPU_BUILD=1 docker compose build backend.
-      # Default 0 keeps the slim CPU image; the app auto-uses CUDA/NVENC when present.
       args:
-        GPU: ${GPU_BUILD:-0}
+        # GPU=1 selects the CUDA flavor of the NeMo-Speech.cpp runtime.
+        # Transcription is GPU-only, so a GPU host MUST build with GPU=1
+        # (GPU=1 docker compose up --build) or transcription fails with a
+        # clear "no CUDA backend" error. The default CPU build serves the
+        # non-transcription features only.
+        GPU: ${GPU:-0}
     container_name: openshorts-backend
     ports:
       - "8000:8000"
@@ -14,9 +17,9 @@ services:
       - /app/__pycache__
       - ./output:/app/output
     # GPU passthrough: when the host has the NVIDIA container runtime,
-    # the backend automatically uses NVENC (encode) + CUDA (decode/Whisper/
-    # YOLO/Parakeet). On CPU-only hosts this reservation is ignored by
-    # Compose v2 (count: 0 when no GPU) and the app falls back to CPU.
+    # the backend gets CUDA (NeMo-Speech.cpp transcription, YOLO, TransNetV2)
+    # + video (NVENC encode). On CPU-only hosts this reservation is ignored
+    # by Compose v2 (count: 0 when no GPU).
     deploy:
       resources:
         reservations:
@@ -31,9 +34,6 @@ services:
       context: ./dashboard
       target: dev
     container_name: openshorts-frontend
-    environment:
-      - VITE_PROXY_TARGET=http://backend:8000
-      - VITE_RENDER_TARGET=http://renderer:3100
     ports:
       - "5175:5173"
     volumes:

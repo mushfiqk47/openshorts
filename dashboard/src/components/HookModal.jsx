@@ -168,7 +168,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                             />
                             {position === 'bottom' && hasCaptions && (
                                 <p className="text-[11px] text-warn mt-1.5 leading-relaxed">
-                                    This clip has captions near the bottom — the hook may
+                                    This clip has captions near the bottom, and the hook may
                                     overlap them (and TikTok's UI). Top is the safe zone.
                                 </p>
                             )}
@@ -198,7 +198,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                             {serverRender && (
                                 <p className="text-[11px] text-muted mt-1.5 leading-relaxed">
                                     This clip re-renders on the server, where the hook is
-                                    static — the entrance animation won't apply.
+                                    static, so the entrance animation won't apply.
                                 </p>
                             )}
                         </div>

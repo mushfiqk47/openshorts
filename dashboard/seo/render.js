@@ -282,7 +282,7 @@ ${page.tldr ? `<div class="tldr"><span class="label">TL;DR</span>${page.tldr.map
 ${page.body}
 ${relatedBlock(related)}
 </div></main>
-${footer()}
+${footer(related)}
 </body>
 </html>`
 }

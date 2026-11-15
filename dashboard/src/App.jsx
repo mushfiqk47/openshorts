@@ -1,29 +1,67 @@
 import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, PanelLeft, PanelLeftClose, Menu } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, PanelLeft, PanelLeftClose, Menu } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
-// Heavy editors/modals are route-level code splits: they load on first open,
-// not on boot. ResultCard stays eager (it IS the results view); everything
-// behind a click becomes a lazy chunk. See OPTIMIZATION_PLAN.md T2.
-const ScheduleWeekModal = lazy(() => import('./components/ScheduleWeekModal'));
-const ClipEditor = lazy(() => import('./components/ClipEditor'));
-const ReframeEditor = lazy(() => import('./components/ReframeEditor'));
-const TopUpModal = lazy(() => import('./components/TopUpModal'));
-const PlanChoiceModal = lazy(() => import('./components/PlanChoiceModal'));
-const TrialUpgradeModal = lazy(() => import('./components/TrialUpgradeModal'));
-const LoginModal = lazy(() => import('./components/LoginModal'));
+// import Gallery from './components/Gallery';
+import ScheduleWeekModal from './components/ScheduleWeekModal';
+import ClipEditor from './components/ClipEditor';
+import ReframeEditor from './components/ReframeEditor';
 import UsageMeter from './components/UsageMeter';
+import TopUpModal from './components/TopUpModal';
 import StarBanner from './components/StarBanner';
+import PlanChoiceModal from './components/PlanChoiceModal';
+import TrialUpgradeModal from './components/TrialUpgradeModal';
+import LoginModal from './components/LoginModal';
+import TrialGate from './components/TrialGate';
+import AdvancedBanner from './components/AdvancedBanner';
+const HistoryTab = lazy(() => import('./components/HistoryTab'));
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
 import EnvSettings from './components/EnvSettings';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
-import { encrypt } from './lib/crypto';
-import { useApiKeys } from './hooks/useApiKeys';
 import { track } from './lib/analytics';
+
+// Enhanced "Encryption" using XOR + Base64 with a Salt
+// This is better than plain Base64 but still client-side.
+const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || "OpenShorts-Static-Salt-Change-Me";
+const ENCRYPTION_PREFIX = "ENC:";
+
+const encrypt = (text) => {
+  if (!text) return '';
+  try {
+    const xor = text.split('').map((c, i) =>
+      String.fromCharCode(c.charCodeAt(0) ^ SECRET_KEY.charCodeAt(i % SECRET_KEY.length))
+    ).join('');
+    return ENCRYPTION_PREFIX + btoa(xor);
+  } catch (e) {
+    console.error("Encryption failed", e);
+    return text;
+  }
+};
+
+const decrypt = (text) => {
+  if (!text) return '';
+  if (text.startsWith(ENCRYPTION_PREFIX)) {
+    try {
+      const raw = text.slice(ENCRYPTION_PREFIX.length);
+      // Check if it's plain base64 or our custom XOR (simple try)
+      const xor = atob(raw);
+      const result = xor.split('').map((c, i) =>
+        String.fromCharCode(c.charCodeAt(0) ^ SECRET_KEY.charCodeAt(i % SECRET_KEY.length))
+      ).join('');
+      return result;
+    } catch (e) {
+      // Fallback if decryption fails (might be old plain text)
+      return '';
+    }
+  }
+  // Backward compatibility: If no prefix, assume old plain text (or return empty if you want to force re-login)
+  // For migration: Return text as is, so it populates the field, and next save will encrypt it.
+  return text;
+};
 
 // Simple TikTok icon sine Lucide might not have it or it varies
 const TikTokIcon = ({ size = 16, className = "" }) => (
@@ -167,7 +205,21 @@ function App() {
   // the ephemeral local /videos/ files have been cleaned up (e.g. after a reload).
   const [durableClips, setDurableClips] = useState({});
 
-  const { apiKey, setApiKey, uploadPostKey, setUploadPostKey, elevenLabsKey, setElevenLabsKey, falKey, setFalKey, uploadUserId, setUploadUserId } = useApiKeys();
+  const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
+  // Social API State - Load encrypted or plain
+  const [uploadPostKey, setUploadPostKey] = useState(() => {
+    const stored = localStorage.getItem('uploadPostKey_v3');
+    if (stored) return decrypt(stored);
+    return '';
+  });
+  // ElevenLabs API State - Load encrypted
+  const [elevenLabsKey, setElevenLabsKey] = useState(() => {
+    const stored = localStorage.getItem('elevenLabsKey_v1');
+    if (stored) return decrypt(stored);
+    return '';
+  });
+
+  const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
   // Post-generation social nudge: shown at the results peak until the user
   // either connects a network or dismisses it. Only 2.7% of cloud users who
@@ -177,25 +229,6 @@ function App() {
     try { return localStorage.getItem('os_social_nudge_dismissed') === '1'; } catch (_) { return false; }
   });
   const [showKeyModal, setShowKeyModal] = useState(false);
-  // Whether the server's own .env already holds an AI configuration (LLM_PROVIDER,
-  // LLM_BASE_URL, or GEMINI_API_KEY). Lets .env-only setups skip the browser gate.
-  const [serverHasKey, setServerHasKey] = useState(null);
-  const refreshServerKey = async () => {
-    try {
-      const d = await apiJson('/api/env');
-      const env = d.env || {};
-      const s = d.secretsSet || {};
-      const hasLlm = !!(
-        env.LLM_PROVIDER ||
-        env.LLM_BASE_URL ||
-        env.LLM_MODEL ||
-        s.LLM_API_KEY ||
-        s.GEMINI_API_KEY
-      );
-      setServerHasKey(hasLlm);
-    } catch { /* backend down — fail open, the job call will surface it */ }
-  };
-  useEffect(() => { refreshServerKey(); }, []);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('os_sidebar_collapsed') === '1'; } catch (_) { return false; }
   });
@@ -228,7 +261,6 @@ function App() {
 
   // Silent-success "saved" states for the settings key inputs (design.md: no alert popups)
   const [elevenLabsSaved, setElevenLabsSaved] = useState(false);
-  const [falSaved, setFalSaved] = useState(false);
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
@@ -314,20 +346,29 @@ function App() {
     handleClipStateChange(index, { activeLayers: null, serverVideoFile: newFile });
   };
 
-
+  // Reopen an archived project from the History tab: the backend re-downloads
+  // its files from R2 into the server's working dir and returns the full state.
+  const restoreProject = async (projectJobId) => {
+    const data = await apiJson(`/api/projects/${projectJobId}/restore`, { method: 'POST' });
+    flushClipState();
+    setProjectState(data.project_state || null);
+    setNoSource(true);
+    setJobId(data.job_id);
+    setResults(data.result || null);
+    setLogs(['♻️ Project restored from your library.']);
+    setProcessingMedia(null);
+    setQualityGate(null);
+    setStatus('complete');
+    setActiveTab('dashboard');
+  };
 
   // Apply one subtitle style to every clip of the job, sequentially.
-  // Bulk failures used to vanish silently (counted, never shown, modal closed
-  // anyway) so a dead server burn read as a dead button: the first error is
-  // now surfaced, quota trips the top-up flow, and the modal stays open.
   const handleBulkSubtitles = async (options) => {
     const clips = results?.clips || [];
     const total = clips.length;
-    if (!total) return { errors: 0 };
+    if (!total) return;
     setBulkSub({ running: true, current: 0, total, errors: 0 });
     let errors = 0;
-    let firstError = '';
-    let quotaHit = null;
     for (let i = 0; i < total; i++) {
       setBulkSub({ running: true, current: i + 1, total, errors });
       try {
@@ -346,44 +387,25 @@ function App() {
             bg_color: options.bgColor,
             bg_opacity: options.bgOpacity,
             style: options.style || 'classic',
-            highlight_color: options.highlightColor || '#3B5BFF',
+            highlight_color: options.highlightColor || '#FFD700',
             effect: options.effect || 'none',
             base_opacity: options.baseOpacity ?? 1.0,
             uppercase: options.uppercase || false,
-            time_offset: options.time_offset ?? 0,
             // Chain from the clip's current server file (its video_url basename).
             input_filename: (clips[i].video_url || '').split('/').pop(),
           }),
         });
-        if (!res.ok) {
-          errors++;
-          if (!firstError) {
-            try { firstError = await res.text(); } catch { firstError = ''; }
-            if (!firstError) firstError = `clip ${i + 1} failed (${res.status})`;
-          }
-        }
-      } catch (e) {
+        if (!res.ok) errors++;
+      } catch {
         errors++;
-        if (e instanceof QuotaError) quotaHit = e;
-        else if (!firstError) firstError = e?.message || `clip ${i + 1} failed`;
       }
     }
-    setBulkSub({ running: false, current: total, total, errors, error: firstError, quota: !!quotaHit });
-    if (quotaHit) {
-      if (me?.status === 'trialing') setShowTrialUpgrade(true);
-      else {
-        setTopUpInfo({ required: quotaHit.minutesRequired, remaining: quotaHit.minutesRemaining });
-        setShowTopUp(true);
-      }
-    }
+    setBulkSub({ running: false, current: total, total, errors });
     // Refresh results so each ResultCard picks up its new subtitled video_url.
-    if (errors < total) {
-      try {
-        const data = await pollJob(jobId);
-        if (data.result) setResults(data.result);
-      } catch { /* keep current results */ }
-    }
-    return { errors, firstError };
+    try {
+      const data = await pollJob(jobId);
+      if (data.result) setResults(data.result);
+    } catch { /* keep current results */ }
   };
 
   const handleDownloadAll = async () => {
@@ -428,13 +450,13 @@ function App() {
         else if (!session.noSource) setProcessingMedia({ type: 'server', payload: `/api/source/${session.jobId}` });
         if (session.noSource) setNoSource(true);
         if (session.projectState) setProjectState(session.projectState);
-        if (session.activeTab === 'dashboard' || session.activeTab === 'settings') setActiveTab(session.activeTab);
+        if (session.activeTab) setActiveTab(session.activeTab);
         // If was processing, resume polling; if complete/error, just show results
         setStatus(session.status === 'processing' ? 'processing' : session.status);
         setSessionRecovered(true);
         setTimeout(() => setSessionRecovered(false), 5000);
       }
-    } catch {
+    } catch (e) {
       localStorage.removeItem(SESSION_KEY);
     }
   }, []);
@@ -463,11 +485,32 @@ function App() {
         timestamp: Date.now()
       };
       localStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
-    } catch {
+    } catch (e) {
       // localStorage full or serialization error - ignore
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId, status, results, activeTab, noSource, projectState]);
+
+  useEffect(() => {
+    // Encrypt Gemini Key too for consistency if desired, but user asked specifically about Social integration not saving well.
+    // For now keeping gemini plain for compatibility unless requested.
+    if (apiKey) localStorage.setItem('gemini_key', apiKey);
+  }, [apiKey]);
+
+  useEffect(() => {
+    if (uploadPostKey) {
+      localStorage.setItem('uploadPostKey_v3', encrypt(uploadPostKey));
+    }
+    if (uploadUserId) {
+      localStorage.setItem('uploadUserId', uploadUserId);
+    }
+  }, [uploadPostKey, uploadUserId]);
+
+  useEffect(() => {
+    if (elevenLabsKey) {
+      localStorage.setItem('elevenLabsKey_v1', encrypt(elevenLabsKey));
+    }
+  }, [elevenLabsKey]);
 
   useEffect(() => {
     if ((uploadPostKey || isManaged) && userProfiles.length === 0) {
@@ -481,10 +524,9 @@ function App() {
     try { localStorage.setItem('os_sidebar_collapsed', sidebarCollapsed ? '1' : '0'); } catch (_) { /* ignore */ }
   }, [sidebarCollapsed]);
 
-  // Close mobile drawer when tab changes + re-check server key on dashboard
+  // Close mobile drawer when tab changes
   useEffect(() => {
     setSidebarMobileOpen(false);
-    if (activeTab === 'dashboard') refreshServerKey();
   }, [activeTab]);
 
   // Esc closes mobile drawer
@@ -543,7 +585,7 @@ function App() {
           console.error("Polling error", e);
           if (e?.status === 404) {
             clearInterval(interval);
-            try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+            try { localStorage.removeItem(SESSION_KEY); } catch {}
             if (status === 'processing') {
               setStatus('error');
               setLogs(prev => [...prev, "Job session expired or not found on server."]);
@@ -581,13 +623,11 @@ function App() {
     }
   };
 
-  // Hosted is paid-only (no BYOK core). Self-host uses BYOK / local LLM.
-  // Local mode: Ollama (default), OpenAI-compatible, or Gemini.
-  // Ollama default is local and does not strictly require an API key.
-  const localProvider = localStorage.getItem('llm_provider') || 'ollama';
-  const hasLocalConfig = localProvider === 'ollama' || !!apiKey;
-  const keysMissing = !billingEnabled && !hasLocalConfig && serverHasKey === false;
-  // Cloud plan state lives in useAuth/me/plan; local builds skip it.
+  // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
+  // Clips-only local mode: only the AI key (Gemini or OpenRouter) is required;
+  // Upload-Post/social is optional and disabled when DISABLE_YOUTUBE_URL is on.
+  const keysMissing = !billingEnabled && !apiKey;
+  const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: show the welcome plan-choice popup once (AuthContext set the
   // flag after the auth redirect). Fires for free users too, so it's gated on
@@ -602,7 +642,14 @@ function App() {
       }
     }
   }, [billingEnabled, isSignedIn]);
-  // Local single-purpose tool: Clip Generator only, no plan gates.
+
+  // Included in the plan (fully managed, no keys): the Clip Generator.
+  // Advanced (bring your own ElevenLabs key): the AI Agent.
+  const INCLUDED_TOOL_TABS = ['dashboard'];
+  const ADVANCED_TOOL_TABS = ['ai-agent'];
+  const TOOL_NAMES = { dashboard: 'the Clip Generator' };
+  const gateThisTab = needsPlan && INCLUDED_TOOL_TABS.includes(activeTab);      // included tool, no plan yet
+  const advancedThisTab = billingEnabled && ADVANCED_TOOL_TABS.includes(activeTab); // BYOK-notice tools
 
   // Social nudge visibility: managed users with clips on screen and no network
   // connected yet. userProfiles being empty (not yet fetched / none created)
@@ -625,7 +672,7 @@ function App() {
       const { access_url } = await apiJson('/api/social/connect', { method: 'POST' });
       // Same tab so the connect page's redirectUrl brings the user back into the app.
       if (access_url) window.location.href = access_url;
-    } catch {
+    } catch (e) {
       alert('Could not open the connection page. Please try again.');
     }
   };
@@ -636,7 +683,7 @@ function App() {
     try {
       const { access_url } = await apiJson('/api/social/connect', { method: 'POST' });
       if (access_url) window.open(access_url, '_blank', 'noopener');
-    } catch {
+    } catch (e) {
       alert('Could not open the calendar. Please try again.');
     }
   };
@@ -653,29 +700,28 @@ function App() {
     setStatus('processing');
     setLogs(["Starting process..."]);
     setResults(null);
-    // Studio handovers have no local media object; the preview switches to the
-    // backend-served source once the job id is known.
-    setProcessingMedia(data.type === 'thumbnail_session' ? null : data);
+
     setQualityGate(null);
     setProjectState(null);
     setNoSource(false);
 
     try {
       let body;
-      // AI provider configuration (Ollama, OpenAI-compatible, or Gemini)
+      // BYOK sends the AI key header; auto-detect OpenRouter (sk-or-*) vs Gemini.
+      // The backend also accepts X-OpenRouter-Key explicitly.
+      const isOR = apiKey && (apiKey.trim().startsWith('sk-or-v1-') || apiKey.trim().startsWith('sk-or-'));
       const headers = {};
-      const llmProvider = localStorage.getItem('llm_provider') || 'ollama';
-      const llmBaseUrl = localStorage.getItem('llm_base_url');
-      const llmModel = localStorage.getItem('llm_model');
-      const llmKey = localStorage.getItem('llm_api_key') || apiKey;
-
-      if (llmProvider === 'gemini') {
-        if (apiKey) headers['X-Gemini-Key'] = apiKey;
-      } else {
-        headers['X-LLM-Provider'] = llmProvider;
-        if (llmBaseUrl) headers['X-LLM-Base-Url'] = llmBaseUrl;
-        if (llmModel) headers['X-LLM-Model'] = llmModel;
-        if (llmKey) headers['X-LLM-Key'] = llmKey;
+      if (apiKey) {
+        if (isOR) {
+          headers['X-OpenRouter-Key'] = apiKey;
+          // Also send a selected model if user chose one (stored in localStorage)
+          try {
+            const m = localStorage.getItem('openrouter_model');
+            if (m) headers['X-OpenRouter-Model'] = m;
+          } catch {}
+        } else {
+          headers['X-Gemini-Key'] = apiKey;
+        }
       }
 
       // Advanced generation controls: only sent when the user set them, so the
@@ -690,35 +736,20 @@ function App() {
         auto_hook_style: data.autoHook ? (data.autoHookStyle || 'classic') : null,
       };
 
-      if (data.type === 'url' && !data.transcriptFile) {
+      if (data.type === 'url') {
         headers['Content-Type'] = 'application/json';
         body = JSON.stringify({
           url: data.payload,
-          acknowledged: true,
+          acknowledged: !!data.acknowledged,
           output_format: data.outputFormat || 'auto',
           force_low_quality: forceLowQuality,
           ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
         });
-      } else if (data.type === 'thumbnail_session') {
-        // Handover from Thumbnail Studio (issue #68): the video and transcript
-        // already live server-side, keyed by the Studio session.
-        headers['Content-Type'] = 'application/json';
-        body = JSON.stringify({
-          thumbnail_session_id: data.payload,
-          acknowledged: true,
-          output_format: data.outputFormat || 'auto',
-          ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
-        });
       } else {
-        // File upload, or a URL paired with a transcript file: multipart
-        // carries the video/URL plus the transcript in one request.
         const formData = new FormData();
-        if (data.type === 'url') formData.append('url', data.payload);
-        else formData.append('file', data.payload);
-        if (data.transcriptFile) formData.append('transcript', data.transcriptFile);
-        formData.append('acknowledged', 'true');
+        formData.append('file', data.payload);
+        formData.append('acknowledged', data.acknowledged ? 'true' : 'false');
         formData.append('output_format', data.outputFormat || 'auto');
-        if (forceLowQuality) formData.append('force_low_quality', 'true');
         for (const [k, v] of Object.entries(advanced)) {
           if (v != null) formData.append(k, v);
         }
@@ -738,10 +769,6 @@ function App() {
         return;
       }
 
-      setJobId(resData.job_id);
-      if (data.type === 'thumbnail_session') {
-        setProcessingMedia({ type: 'server', payload: `/api/source/${resData.job_id}` });
-      }
 
     } catch (e) {
       if (e instanceof QuotaError) {
@@ -780,7 +807,9 @@ function App() {
   const Sidebar = () => {
     const navItems = [
       { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator' },
-      { id: 'settings', ord: '02', icon: Settings, label: 'Settings' },
+      { id: 'ai-agent', ord: '02', icon: Bot, label: 'AI Agent', byok: true },
+      ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '03', icon: History, label: 'History' }] : []),
+      { id: 'settings', ord: '04', icon: Settings, label: 'Settings' },
     ];
     const isCollapsed = sidebarCollapsed;
 
@@ -801,23 +830,9 @@ function App() {
           className={`${isCollapsed ? 'lg:w-16' : 'lg:w-64'} w-64 bg-paper2 border-r border-rule flex flex-col h-full shrink-0 transition-all duration-300 ease-in-out fixed lg:static inset-y-0 left-0 z-40 ${sidebarMobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}
         >
           <div className={`flex items-center gap-3 shrink-0 ${isCollapsed ? 'p-3 lg:justify-center' : 'p-6'}`}>
-            <a href="#landing" className="flex items-center gap-3 min-w-0" title="go to landing page">
-              <div className="w-8 h-8 bg-paper3 rounded-input flex items-center justify-center shrink-0 overflow-hidden border border-rule">
-                <img src="/logo-openshorts.png" alt="OpenShorts logo" width="32" height="32" className="w-full h-full object-cover" />
-              </div>
-              {!isCollapsed && <span className="font-display lowercase text-lg text-ink hidden lg:block truncate">openshorts</span>}
+            <a href="#app" className="flex items-center min-w-0" title="openshorts">
+              {!isCollapsed && <span className="font-display font-medium lowercase text-lg text-ink truncate">openshorts</span>}
             </a>
-            {/* Desktop collapse toggle */}
-            <button
-              onClick={() => setSidebarCollapsed(!isCollapsed)}
-              className="hidden lg:flex ml-auto w-9 h-9 items-center justify-center rounded-input border border-rule bg-paper text-muted hover:text-ink hover:bg-paper3 transition-colors shrink-0"
-              aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              aria-expanded={!isCollapsed}
-              aria-controls="app-sidebar"
-              title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            >
-              {isCollapsed ? <PanelLeft size={14} /> : <PanelLeftClose size={14} />}
-            </button>
             {/* Mobile close */}
             <button
               onClick={() => setSidebarMobileOpen(false)}
@@ -858,14 +873,6 @@ function App() {
           </nav>
 
           <div className={`border-t border-rule space-y-1 shrink-0 ${isCollapsed ? 'p-2' : 'p-4'}`}>
-            <a
-              href="#landing"
-              title={isCollapsed ? 'landing page' : undefined}
-              className={`flex items-center gap-2 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors ${isCollapsed ? 'justify-center px-1' : 'px-3'}`}
-            >
-              <Globe size={14} className="shrink-0" />
-              {!isCollapsed && <span className="truncate">landing page</span>}
-            </a>
             <a
               href="https://github.com/mutonby/openshorts"
               target="_blank"
@@ -986,11 +993,11 @@ function App() {
               <button
                 onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : setActiveTab('settings'))}
                 className="badge-warn hover:brightness-125 transition-all"
-                title="Configure AI model (Ollama local, OpenAI-compatible, or Gemini)"
+                title="Configure AI API key (Gemini or OpenRouter free)"
               >
                 <AlertTriangle size={12} />
-                <span className="hidden sm:inline">AI Model Not Configured</span>
-                <span className="sm:hidden">ai missing</span>
+                <span className="hidden sm:inline">AI API Key Missing (Gemini or OpenRouter)</span>
+                <span className="sm:hidden">key missing</span>
               </button>
             )}
           </div>
@@ -1002,9 +1009,9 @@ function App() {
             <div className="flex items-center gap-3 text-sm text-ink2">
               <KeyRound size={16} className="shrink-0 text-warn" />
               <div>
-                <span className="font-medium text-ink">AI model not configured.</span>{' '}
+                <span className="font-medium text-ink">AI API key missing.</span>{' '}
                 <span className="text-muted">
-                  Configure Ollama (local default), an OpenAI-compatible endpoint, or Gemini in Settings to generate clips.
+                  Set your Gemini or OpenRouter (free) API key in Settings to generate clips.
                 </span>
               </div>
             </div>
@@ -1031,16 +1038,22 @@ function App() {
           </div>
         )}
 
+        {/* Included tools (Clip Generator, YouTube Studio): non-blocking trial prompt. */}
+        {gateThisTab && <TrialGate toolName={TOOL_NAMES[activeTab] || 'this'} />}
+
+        {/* Advanced tools (AI Shorts, AI Agent): BYOK fal.ai + ElevenLabs notice. */}
+        {advancedThisTab && <AdvancedBanner needsPlan={needsPlan} onKeys={() => setActiveTab('settings')} />}
+
         {/* Main Workspace */}
         <div className="flex-1 overflow-hidden relative">
 
           {/* View: Settings */}
           {activeTab === 'settings' && (
-            <div className="h-full overflow-y-auto p-4 sm:p-8 max-w-2xl mx-auto animate-fade">
+            <div className="h-full overflow-y-auto custom-scrollbar p-4 sm:p-8 max-w-2xl mx-auto animate-fade">
               <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-8">
                 <div>
                   <p className="eyebrow mb-1.5">07 · SETTINGS</p>
-                  <h1 className="font-display lowercase text-2xl text-ink">Settings</h1>
+                  <h1 className="font-display font-medium lowercase text-2xl text-ink">Settings</h1>
                 </div>
                 <div className="flex items-center gap-2 text-xs text-muted mt-1">
                   <Shield size={12} className="text-ok shrink-0" /> Privacy: keys only live in your browser (sent to backend just to process)
@@ -1059,7 +1072,7 @@ function App() {
                   </div>
                   <p className="text-xs text-muted mb-5 leading-relaxed">
                     Your plan includes the <strong>Clip Generator</strong> and <strong>YouTube Studio</strong>,
-                    fully managed — no API keys required. AI Shorts &amp; dubbing use your own fal.ai / ElevenLabs
+                    fully managed, no API keys required. AI Shorts &amp; dubbing use your own fal.ai / ElevenLabs
                     keys (below). Connect your social accounts to publish directly.
                   </p>
                   <div className="flex flex-wrap gap-2">
@@ -1083,7 +1096,7 @@ function App() {
                     <span className="badge-ok">Free plan available</span>
                   </div>
                   <p className="text-xs text-muted mb-5 leading-relaxed">
-                    Generate shorts with zero setup — no API keys needed. Start free with 20 min/month, or go paid from $12/mo. Cancel anytime.
+                    Generate shorts with zero setup, no API keys needed. Start free with 20 min/month, or go paid from $12/mo. Cancel anytime.
                   </p>
                   <button onClick={() => setShowPlanChoice(true)} className="btn-primary py-2 px-4 text-sm">
                     <Sparkles size={16} /> Choose a plan
@@ -1104,10 +1117,10 @@ function App() {
                     </div>
                     <h2 className="text-base font-medium text-ink lowercase">Social Integration</h2>
                   </div>
-                  <span className="readout">Optional — clips only</span>
+                  <span className="readout">Optional, clips only</span>
                 </div>
                 <p className="text-xs text-muted mb-6 leading-relaxed">
-                  Optional — only needed to auto-post clips to TikTok / Instagram / YouTube via <strong>Upload-Post</strong>.
+                  Optional, only needed to auto-post clips to TikTok / Instagram / YouTube via <strong>Upload-Post</strong>.
                   Clips generate and download fine without it. Enable when you want automation.
                 </p>
                 <div className="space-y-4">
@@ -1162,7 +1175,7 @@ function App() {
                   <span className="readout">BYOK</span>
                 </div>
                 <p className="text-xs text-muted mb-6 leading-relaxed">
-                  For <strong>AI Shorts &amp; dubbing</strong> — bring your own key. Translate your clips to different
+                  For <strong>dubbing</strong>, bring your own key. Translate your clips to different
                   languages using <strong>ElevenLabs</strong> AI dubbing (billed by ElevenLabs). Not covered by your plan.
                 </p>
                 <div className="space-y-4">
@@ -1207,66 +1220,141 @@ function App() {
                   </p>
                 </div>
               </div>
+            </div>
+          )}
 
-              <div className="card p-4 sm:p-6 mt-8">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
-                      <Sparkles size={16} className="text-brass" />
-                    </div>
-                    <h2 className="text-base font-medium text-ink lowercase">AI Shorts (UGC Videos)</h2>
-                  </div>
-                  <span className="readout">BYOK</span>
-                </div>
-                <p className="text-xs text-muted mb-6 leading-relaxed">
-                  Generate UGC-style videos with AI actors for any product or business using <strong>fal.ai</strong>.
-                  <strong> Not covered by your plan</strong> — bring your own fal.ai + ElevenLabs keys (billed by those
-                  providers, ~$0.65-2 per video). Your plan still covers the AI script &amp; orchestration.
-                </p>
-                <div className="space-y-4">
-                  <label className="block text-sm text-muted">fal.ai API Key</label>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <input
-                      type="password"
-                      value={falKey}
-                      onChange={(e) => setFalKey(e.target.value)}
-                      className="input-field"
-                      placeholder="fal_..."
-                    />
-                    <button
-                      onClick={() => {
-                        if (falKey) {
-                          localStorage.setItem('falKey_v1', encrypt(falKey));
-                          setFalSaved(true);
-                          setTimeout(() => setFalSaved(false), 2000);
-                        }
-                      }}
-                      className={falSaved ? 'badge-ok px-4' : 'btn-quiet py-2 px-4 text-sm'}
-                    >
-                      {falSaved ? <><Check size={12} /> saved</> : 'Save'}
-                    </button>
-                  </div>
-                  <p className="text-xs text-muted leading-relaxed">
-                    Get your API key from fal.ai to enable AI actor video generation.
-                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">1. Sign Up</span>
-                        <span className="text-xs text-muted">Create fal.ai account</span>
-                      </a>
-                      <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">2. API Key</span>
-                        <span className="text-xs text-muted">Generate key</span>
-                      </a>
-                    </div>
-                    <br />
-                    <span className="text-muted">
-                      Keys are only stored in your browser. Sent to backend only to process requests.
-                    </span>
+
+          {/* View: AI Agent */}
+          {activeTab === 'ai-agent' && (
+            <div className="h-full overflow-y-auto custom-scrollbar p-4 sm:p-6 md:p-10 animate-fade">
+              <div className="max-w-4xl mx-auto space-y-8">
+
+                {/* Header */}
+                <div className="space-y-3">
+                  <p className="eyebrow flex items-center gap-2">
+                    <Bot size={12} /> 03 · AI AGENT · AUTONOMOUS SKILL
+                  </p>
+                  <h1 className="font-display font-semibold lowercase text-3xl md:text-4xl text-ink">
+                    Your Personal Clipping Team
+                  </h1>
+                  <p className="text-muted text-base md:text-lg leading-relaxed max-w-2xl">
+                    Drop your videos in a folder and a team of AI clippers picks the viral moments, edits them, and queues them for your approval, like having a 24/7 short-form editing crew on autopilot.
                   </p>
                 </div>
+
+                {/* Mobile-format warning */}
+                <div className="px-4 py-3 rounded-card border border-rule bg-paper2 flex items-start gap-3">
+                  <Smartphone size={18} className="text-warn shrink-0 mt-0.5" />
+                  <div className="text-sm text-ink2">
+                    <p className="font-medium text-ink mb-1">Upload videos already in vertical (9:16) mobile format.</p>
+                    <p className="text-muted leading-relaxed">
+                      The agent does not reframe horizontal footage. Make sure every source video is shot or pre-cropped to mobile/portrait format before dropping it into the input folder.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Workflow */}
+                <div className="grid md:grid-cols-3 gap-4">
+                  <div className="card p-5 space-y-2">
+                    <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
+                      <Upload size={18} className="text-brass" />
+                    </div>
+                    <h3 className="font-medium text-ink lowercase">1. Drop your videos</h3>
+                    <p className="text-xs text-muted leading-relaxed">
+                      Put your long-form vertical footage in the watched folder. The skill picks one video per run.
+                    </p>
+                  </div>
+
+                  <div className="card p-5 space-y-2">
+                    <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
+                      <Users size={18} className="text-brass" />
+                    </div>
+                    <h3 className="font-medium text-ink lowercase">2. AI clippers work</h3>
+                    <p className="text-xs text-muted leading-relaxed">
+                      Whisper transcribes, Gemini 3 Flash spots viral beats, FFmpeg cuts each clip and adds a hook overlay.
+                    </p>
+                  </div>
+
+                  <div className="card p-5 space-y-2">
+                    <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
+                      <CheckCircle2 size={18} className="text-brass" />
+                    </div>
+                    <h3 className="font-medium text-ink lowercase">3. You validate, it ships</h3>
+                    <p className="text-xs text-muted leading-relaxed">
+                      Approve the candidates you like and the skill auto-publishes them to TikTok, Reels and YouTube Shorts via Upload-Post.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Repo CTA */}
+                <div className="card p-6 md:p-8 space-y-5">
+                  <div className="flex items-start justify-between gap-4 flex-wrap">
+                    <div>
+                      <h2 className="font-display font-medium lowercase text-xl text-ink mb-1">skill-autoshorts</h2>
+                      <p className="text-sm text-muted">
+                        The Claude Code skill that powers this workflow. Install it once and trigger it whenever you want a fresh batch of clips.
+                      </p>
+                    </div>
+                    <a
+                      href="https://github.com/mutonby/skill-autoshorts"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn-primary py-2 px-4 text-sm shrink-0"
+                    >
+                      View on GitHub <ExternalLink size={14} />
+                    </a>
+                  </div>
+
+                  <div className="bg-paper border border-rule rounded-card p-4 font-mono text-xs text-ink2 flex items-center justify-between gap-3">
+                    <span className="truncate">git clone https://github.com/mutonby/skill-autoshorts</span>
+                    <button
+                      onClick={() => navigator.clipboard.writeText('git clone https://github.com/mutonby/skill-autoshorts')}
+                      className="text-muted hover:text-ink transition-colors shrink-0"
+                      title="Copy"
+                    >
+                      <Copy size={14} />
+                    </button>
+                  </div>
+
+                  <div className="grid sm:grid-cols-2 gap-3 text-sm">
+                    <div className="flex items-start gap-2 text-ink2">
+                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
+                      <span>Daily batch, picks one long video per run</span>
+                    </div>
+                    <div className="flex items-start gap-2 text-ink2">
+                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
+                      <span>Whisper transcription with word-level timing</span>
+                    </div>
+                    <div className="flex items-start gap-2 text-ink2">
+                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
+                      <span>Gemini 3 Flash multimodal moment detection</span>
+                    </div>
+                    <div className="flex items-start gap-2 text-ink2">
+                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
+                      <span>Auto-publish to TikTok, Reels & YouTube Shorts</span>
+                    </div>
+                  </div>
+                </div>
+
               </div>
             </div>
           )}
+
+          {/* View: History */}
+          {activeTab === 'history' && (
+            <Suspense fallback={<div className="flex items-center justify-center h-full p-8"><Loader2 className="animate-spin text-muted" size={24} aria-label="loading history" /></div>}>
+              <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
+                <div className="max-w-6xl mx-auto p-6 md:p-8">
+                  <HistoryTab onReopenProject={restoreProject} />
+                </div>
+              </div>
+            </Suspense>
+          )}
+
+          {/* View: Gallery */}
+          {/* {activeTab === 'gallery' && (
+            <Gallery />
+          )} */}
 
           {/* View: Dashboard (Idle) */}
           {activeTab === 'dashboard' && status === 'idle' && (
@@ -1275,7 +1363,7 @@ function App() {
               <div className="max-w-xl w-full text-center space-y-8">
                 <div className="space-y-4">
                   <p className="eyebrow">01 · CLIP GENERATOR</p>
-                  <h1 className="font-display lowercase text-4xl md:text-5xl text-ink">
+                  <h1 className="font-display font-semibold lowercase text-4xl md:text-5xl text-ink">
                     Create Viral Shorts
                   </h1>
                   <p className="text-muted text-lg">
@@ -1360,7 +1448,7 @@ function App() {
 
               {/* Right Panel: Results Grid */}
               <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} md:h-full flex flex-col shrink-0 md:shrink card p-4 sm:p-6 transition-all duration-700 ease-in-out`}>
-                <h2 className="font-display lowercase text-xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
+                <h2 className="font-display font-medium lowercase text-xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
                   Generated Shorts
                   {results?.clips?.length > 0 && (
                     <span className="readout bg-paper3 px-2.5 py-1 rounded-full ml-auto">
@@ -1418,7 +1506,7 @@ function App() {
                       <div className="w-full flex items-center gap-3 px-3 py-2.5 rounded-input bg-paper3 border border-rule text-sm">
                         <div className="flex-1 min-w-0">
                           <span className="text-ink">Publish these clips straight from here.</span>{' '}
-                          <span className="text-muted">Connect your YouTube, TikTok or Instagram once — after that every clip is one click from posted.</span>
+                          <span className="text-muted">Connect your YouTube, TikTok or Instagram once, after that every clip is one click from posted.</span>
                         </div>
                         <button
                           onClick={() => { track('SocialNudgeConnect'); handleConnectSocials(); }}
@@ -1538,7 +1626,7 @@ function App() {
           <div className={`rounded-input p-4 space-y-2 border ${!apiKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
               {apiKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Gemini API Key {apiKey && <span className="text-ok">— set</span>}
+              Gemini API Key {apiKey && <span className="text-ok">· set</span>}
             </p>
             {!apiKey && (
               <>
@@ -1566,7 +1654,7 @@ function App() {
           <div className={`rounded-input p-4 space-y-2 border ${!uploadPostKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
               {uploadPostKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Upload-Post API Key {uploadPostKey && <span className="text-ok">— set</span>}
+              Upload-Post API Key {uploadPostKey && <span className="text-ok">· set</span>}
             </p>
             {!uploadPostKey && (
               <>
@@ -1595,7 +1683,6 @@ function App() {
         </div>
       </Modal>
 
-      <Suspense fallback={null}>
       <ScheduleWeekModal
         isOpen={showScheduleWeek}
         onClose={() => setShowScheduleWeek(false)}
@@ -1605,7 +1692,6 @@ function App() {
         uploadUserId={uploadUserId}
         isManaged={isManaged}
       />
-      </Suspense>
 
       {/* Pre-flight quality gate */}
       {qualityGate && (
@@ -1617,7 +1703,7 @@ function App() {
             </p>
             {qualityGate.info.cookies_invalid && (
               <p className="text-xs text-muted">
-                Your YouTube cookies look expired — refreshing them (export again from an incognito window) often unlocks HD.
+                Your YouTube cookies look expired. Refreshing them (export again from an incognito window) often unlocks HD.
               </p>
             )}
             <div className="flex gap-2 justify-end pt-2">
@@ -1635,7 +1721,6 @@ function App() {
 
 
       {editingClip !== null && results?.clips?.[editingClip] && (
-        <Suspense fallback={null}>
         <ClipEditor
           jobId={jobId}
           clipIndex={editingClip}
@@ -1643,10 +1728,8 @@ function App() {
           onClose={() => setEditingClip(null)}
           onRerendered={handleClipRerendered}
         />
-        </Suspense>
       )}
       {reframingClip !== null && results?.clips?.[reframingClip] && (
-        <Suspense fallback={null}>
         <ReframeEditor
           jobId={jobId}
           clipIndex={reframingClip}
@@ -1654,9 +1737,7 @@ function App() {
           onClose={() => setReframingClip(null)}
           onReframed={handleClipRerendered}
         />
-        </Suspense>
       )}
-      <Suspense fallback={null}>
       {showLogin && <LoginModal onClose={() => setShowLogin(false)} />}
       {showPlanChoice && <PlanChoiceModal onClose={() => setShowPlanChoice(false)} />}
       {showTopUp && (
@@ -1674,7 +1755,6 @@ function App() {
           onClose={() => setShowTrialUpgrade(false)}
         />
       )}
-      </Suspense>
     </div>
   );
 }

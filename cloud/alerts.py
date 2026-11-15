@@ -52,7 +52,7 @@ def _classify_failure(err: str) -> str:
     if "sign in to confirm" in e or "not a bot" in e or "http error 403" in e \
             or "http error 429" in e or "video unavailable" in e or "read timed out" in e:
         return "youtube download"
-    if "whisper" in e or "faster_whisper" in e or "transcrib" in e or "av/container" in e:
+    if "whisper" in e or "nemo_speech" in e or "nemo-speech" in e or "transcrib" in e or "av/container" in e:
         return "transcription"
     # User content rejected by the AI provider's policy filter — deterministic,
     # not actionable on our side. Named so the alert doesn't read as an outage.

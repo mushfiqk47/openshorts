@@ -522,8 +522,15 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                     init = f"w={crop_w}:h={crop_h}:x={seg_xs[0]}:y=0"
                 with open(cmd_path, "w") as f:
                     f.write("\n".join(lines) + "\n")
+                # Filter-graph escaping, two layers: backslashes are escape
+                # characters inside a filter graph (a Windows path gets
+                # mangled), AND the drive-letter colon is an option separator
+                # the parser breaks on even inside quotes ("No option name
+                # near '/Users/...'"). Forward slashes + escaped colon is the
+                # form ffmpeg accepts on Windows.
+                filter_cmd_path = cmd_path.replace(os.sep, "/").replace(":", r"\:")
                 graph = (
-                    f"[0:v]sendcmd=f='{cmd_path}',"
+                    f"[0:v]sendcmd=f='{filter_cmd_path}',"
                     f"crop@c={init},"
                     f"scale={out_w}:{out_h},setsar=1[v]"
                 )

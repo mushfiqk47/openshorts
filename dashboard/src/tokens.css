@@ -1,53 +1,67 @@
-/* Hallmark · genre: atmospheric · theme: lumen (night foundry) · design-system: design.md · designed-as-app
- * macrostructure: Marquee Hero (marketing) / Workbench (app) / Long Document (content)
- * nav: N9 edge-aligned · footer: Ft5 statement · enrichment: filament apparatus (landing only)
- * pre-emit critique: P5 H4 E4 S5 R5 V4
+/* Stark · graphite — MiniMax design language, dark-only adaptation (owner
+ * decision 2026-11-15). Neutral near-black canvas, near-white ink, hairline
+ * flat cards, pill CTAs (the accent IS ink), DM Sans everywhere; brand colors
+ * are reserved for product-identity moments. design-system: design.md · designed-as-app
  */
 
 :root {
-  /* paper */
-  --color-paper: oklch(13% 0.014 265);
-  --color-paper-2: oklch(16.5% 0.015 265);
-  --color-paper-3: oklch(20% 0.016 265);
+  /* paper — neutral graphite, no hue (MiniMax runs stark monochrome) */
+  --color-paper: oklch(14% 0 0);        /* page canvas */
+  --color-paper-2: oklch(18.5% 0 0);    /* elevated surface (cards, modals, sidebar) */
+  --color-paper-3: oklch(23% 0 0);      /* hover surface / inset chips */
 
   /* ink */
-  --color-ink: oklch(96% 0.006 262);
-  --color-ink-2: oklch(86% 0.01 262);
-  --color-muted: oklch(64% 0.012 262);
+  --color-ink: oklch(97% 0 0);          /* headlines, near-white */
+  --color-ink-2: oklch(88% 0 0);        /* body text */
+  --color-muted: oklch(62% 0 0);        /* secondary text */
 
-  /* rules */
-  --color-rule: oklch(96% 0.006 262 / 0.08);
-  --color-rule-2: oklch(96% 0.006 262 / 0.14);
-  --rule-blueprint: oklch(96% 0.006 262 / 0.04);
+  /* rules — white-alpha hairlines */
+  --color-rule: oklch(97% 0 0 / 0.10);
+  --color-rule-2: oklch(97% 0 0 / 0.16);
+  --rule-blueprint: oklch(97% 0 0 / 0.05); /* scanner grid (ProcessingAnimation only) */
 
-  /* accents */
-  --color-accent: oklch(76% 0.17 50);
-  --color-accent-ink: oklch(17% 0.03 50);
-  --color-accent-2: oklch(68% 0.16 18);
-  --color-glow: oklch(80% 0.16 50 / 0.42);
-  --color-paper-emit: oklch(76% 0.17 50 / 0.04);
-  --color-focus: oklch(76% 0.17 50);
+  /* accents — the accent IS ink: primary CTAs are white pills with near-black
+   * labels, the dark inversion of MiniMax's black-pill-on-white signature */
+  --color-accent: oklch(97% 0 0);
+  --color-accent-ink: oklch(13% 0 0);
+  --color-accent-2: oklch(66% 0.19 27);  /* brand coral — identity moments ONLY */
+  --color-glow: oklch(97% 0 0 / 0.10);   /* scanner halo (ProcessingAnimation only) */
+  --color-paper-emit: oklch(97% 0 0 / 0.03); /* scanner overlay wash */
+  --color-focus: oklch(70% 0.13 255);    /* electric blue — focus rings + form activation */
 
   /* states */
-  --color-ok: oklch(75% 0.11 150);
-  --color-danger: oklch(66% 0.18 25);
-  --color-warn: oklch(78% 0.14 75);
+  --color-ok: oklch(76% 0.12 150);
+  --color-danger: oklch(68% 0.17 25);
+  --color-warn: oklch(80% 0.13 80);
 
-  /* type */
-  --font-display: "Instrument Serif", ui-serif, Georgia, serif;
-  --font-body: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  /* product-identity encoding (reserved — MiniMax rule: a brand color earns a
+   * surface only when the surface IS the product; never on generic chrome).
+   * coral M2.7-style · magenta Music-style · blue Hailuo-style · cyan wash ·
+   * purple Speech-style · orange Speech-gradient mate */
+  --color-brand-coral: oklch(66% 0.19 27);
+  --color-brand-magenta: oklch(68% 0.19 335);
+  --color-brand-blue: oklch(62% 0.16 260);
+  --color-brand-cyan: oklch(80% 0.12 220);
+  --color-brand-purple: oklch(65% 0.19 295);
+  --color-brand-orange: oklch(74% 0.15 55);
+
+  /* type — DM Sans is the single UI typeface (display + body); Inter is the
+   * declared fallback, never loaded. JetBrains Mono stays for the mono data
+   * register (readouts/code — the one sanctioned second face). */
+  --font-display: "DM Sans", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "DM Sans", "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-  --text-display: clamp(3rem, 6vw + 1rem, 6rem);
-  --tracking-display: -0.032em;
   --tracking-micro: 0.10em;
 
-  /* geometry */
-  --radius-card: 10px;
+  /* geometry — MiniMax radius scale: docs-register cards 12, inputs 8,
+   * pills for every button/chip/badge, 32 reserved for featured identity panels */
+  --radius-card: 12px;
   --radius-input: 8px;
+  --radius-feature: 32px;
 
-  /* motion */
+  /* motion — MiniMax recommendation: 150–200ms UI state transitions */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --dur-short: 220ms;
+  --dur-short: 180ms;
   --dur-reveal: 600ms;
   --dur-pulse: 4s;
 }

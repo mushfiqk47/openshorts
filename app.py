@@ -19,37 +19,76 @@ import glob
 import time
 import zipfile
 import math
+import itertools
 import asyncio
-import httpx
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
-from s3_uploader import upload_job_artifacts
+from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import recut
 
 load_dotenv()
 
-# Process-wide env constants live in config.py; job store in state.py.
-# Re-exported here so `app_module.<name>` keeps working for callers/tests.
-from config import (
-    BILLING_ENABLED, DEBUG_LOGS, DISABLE_YOUTUBE_URL, JOB_RETENTION_SECONDS,
-    MAX_CONCURRENT_JOBS, MAX_FILE_SIZE_MB,
-    MIN_SOURCE_SECONDS, OUTPUT_DIR, OUTPUT_MAX_GB, QUALITY_GATE_MIN_HEIGHT,
-    QUALITY_PROBE_SCRIPT, UPLOAD_DIR, UPLOADS_MAX_GB,
-    layout_env,
-)
+# Constants
+UPLOAD_DIR = "uploads"
+OUTPUT_DIR = "output"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Configuration
+# Default to 1 if not set, but user can set higher for powerful servers
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
+MAX_FILE_SIZE_MB = 2048  # 2GB limit
+
+# How TikTok receives our uploads. MEDIA_UPLOAD lands the video in the user's
+# TikTok drafts so they finish the post inside TikTok's own editor; DIRECT_POST
+# publishes straight to their feed, which is Upload-Post's default.
+#
+# Drafts are the safer default for an automated pipeline: nothing reaches an
+# audience without the account owner seeing it first, and TikTok's own editor is
+# where covers, sounds and hashtags actually get chosen. The UI must say so —
+# a user who expects a published post and finds a draft will read it as a bug.
+TIKTOK_POST_MODE = os.environ.get("TIKTOK_POST_MODE", "MEDIA_UPLOAD").strip()
+# Ceiling for the working directory once it lives on a persistent volume: the
+# age-based sweep alone can't stop a burst of long videos from filling the disk.
+# 0 disables the cap.
+OUTPUT_MAX_GB = int(os.environ.get("OUTPUT_MAX_GB", "25"))
+# Same idea for source uploads, which are the biggest single files on disk.
+UPLOADS_MAX_GB = int(os.environ.get("UPLOADS_MAX_GB", "15"))
+# Pre-flight quality gate: warn before processing a YouTube source below this
+# height (0 disables). Only applies to URLs; uploads are whatever the user gave.
+QUALITY_GATE_MIN_HEIGHT = int(os.environ.get("QUALITY_GATE_MIN_HEIGHT", "720"))
+# Reject sources shorter than this before starting (0 disables). A 24s YouTube
+# Short cannot yield 15-60s clips: Gemini returns nothing, the job burns
+# managed minutes and dies with "no usable clips" (prod 20-ago: 3 of 5 recent
+# failures were exactly this, one user retrying the same 24s video).
+MIN_SOURCE_SECONDS = int(os.environ.get("MIN_SOURCE_SECONDS", "45"))
+QUALITY_PROBE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quality_probe.py")
+DISABLE_YOUTUBE_URL = os.environ.get("DISABLE_YOUTUBE_URL", "false").lower() in ("1", "true", "yes")
 
 # ---- Cloud billing (paid / managed-keys) integration --------------------------
 # All paid-mode code lives in the optional `cloud/` package and is imported ONLY
-# when BILLING_ENABLED is set (imported from config above). With the flag off,
-# the app behaves exactly as the self-hosted BYOK app does today.
+# when BILLING_ENABLED is set. With the flag off, the app behaves exactly as the
+# self-hosted BYOK app does today (no extra dependencies required).
+BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "").lower() in ("1", "true", "yes")
+
+# Job/file retention (issue #46). Self-host defaults to 24h: the 1h sweep kept
+# deleting finished projects under users who never touched their env, and the
+# OUTPUT_MAX_GB / UPLOADS_MAX_GB caps below already bound the disk. Cloud keeps
+# the tight default because clips are archived to R2 as soon as a job finishes.
+JOB_RETENTION_SECONDS = int(
+    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "86400")
+)
+# Force full pipeline logs to the client even under billing (local debugging).
+DEBUG_LOGS = os.environ.get("DEBUG_LOGS", "").lower() in ("1", "true", "yes")
+
 if BILLING_ENABLED:
     import cloud
     from cloud import managed_keys, metering as _metering, config as _cloud_config, alerts as _alerts
@@ -79,43 +118,60 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     gets the managed server key, everyone else gets ``None`` (→ 402, start trial).
     Self-host keeps BYOK: header wins, else the env fallback.
 
-    Supports Ollama (default), any OpenAI-compatible base model, or Gemini.
+    Also accepts OpenRouter: if X-OpenRouter-Key (or an sk-or-v1-* value in
+    X-Gemini-Key) is present, it is returned as-is and the pipeline will route
+    through OpenRouter. This keeps the dashboard's single key field working.
     """
     if BILLING_ENABLED:
         user = await _user_from_request(request)
         if managed_keys.has_active_entitlement(user):
             return managed_keys.gemini_key()
         return None
-    for hdr in ("X-LLM-Key", "X-LLM-API-Key", "X-Gemini-Key", "X-API-Key"):
+    # Prefer explicit OpenRouter header, then Gemini header (which may hold an OR key)
+    for hdr in ("X-OpenRouter-Key", "X-OpenRouter-API-Key", "X-Gemini-Key"):
         val = request.headers.get(hdr)
         if val and val.strip():
             return val.strip()
-    return os.environ.get("LLM_API_KEY") or os.environ.get("GEMINI_API_KEY") or "ollama"
+    # Also check OPENROUTER env (so .env with only OPENROUTER_API_KEY works)
+    or_env = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY")
+    if or_env and or_env.strip():
+        return or_env.strip()
+    return os.environ.get("GEMINI_API_KEY")
 
 
 def _resolve_ai_provider(request: Request) -> str:
-    """'gemini' when explicitly chosen or with Gemini key, else default 'ollama' / 'openai_compatible'."""
-    p_hdr = request.headers.get("X-LLM-Provider")
-    if p_hdr and p_hdr.strip():
-        return p_hdr.strip().lower()
-    if request.headers.get("X-Gemini-Key"):
-        return "gemini"
-    p_env = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
-    if p_env in ("gemini",):
-        return "gemini"
-    if os.environ.get("GEMINI_API_KEY") and not os.environ.get("LLM_BASE_URL") and not p_env:
-        return "gemini"
-    return p_env or "ollama"
+    """'openrouter' when the resolved key looks like an OpenRouter key, else 'gemini'."""
+    key = None
+    for hdr in ("X-OpenRouter-Key", "X-OpenRouter-API-Key", "X-Gemini-Key"):
+        v = request.headers.get(hdr)
+        if v and v.strip():
+            key = v.strip()
+            break
+    if not key:
+        key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY") or ""
+    k = key.strip()
+    if k.startswith("sk-or-v1-") or k.startswith("sk-or-"):
+        return "openrouter"
+    # OpenRouter key can also be in env even when header holds dummy
+    or_env = os.environ.get("OPENROUTER_API_KEY") or ""
+    if or_env.strip().startswith("sk-or-"):
+        # If header is empty but env has OR key, provider is OR
+        if not request.headers.get("X-Gemini-Key"):
+            return "openrouter"
+    return "gemini"
 
 
-def _resolve_llm_config(request: Request) -> tuple[str, str, str]:
-    """Returns (base_url, model, api_key) for the request."""
-    import llm_client
-    hdr_dict = dict(request.headers)
-    base_url = llm_client.resolve_llm_base_url(hdr_dict)
-    model = llm_client.resolve_llm_model(hdr_dict)
-    key = llm_client.resolve_llm_key(hdr_dict)
-    return base_url, model, key
+def _resolve_openrouter_model(request: Request) -> str:
+    """Model for OpenRouter jobs (header X-OpenRouter-Model wins)."""
+    for hdr in ("X-OpenRouter-Model", "X-OpenRouter-model"):
+        v = request.headers.get(hdr)
+        if v and v.strip():
+            return v.strip()
+    return (
+        os.environ.get("OPENROUTER_MODEL")
+        or os.environ.get("GEMINI_MODEL")
+        or "openrouter/free"
+    ).strip() or "openrouter/free"
 
 
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
@@ -163,17 +219,17 @@ def resolve_post_profile(forced_profile: Optional[str], client_profile: Optional
 
 
 def gemini_missing_error():
-    """The right 4xx when no AI key / model could be resolved.
+    """The right 4xx when no Gemini key could be resolved.
 
     402 for a signed-in-but-not-entitled cloud user (needs a plan); 400 otherwise
-    (missing AI configuration).
+    (BYOK header simply missing).
     """
     if BILLING_ENABLED:
         return HTTPException(status_code=402, detail={
             "error": "no_plan",
             "message": "This action needs an active plan. Choose a plan or add your own API key.",
         })
-    return HTTPException(status_code=400, detail="Missing AI configuration. Ensure Ollama is running (http://localhost:11434) or configure an API key.")
+    return HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
 
 
 # Probe rate limiter. In-memory, resets on restart by design — the hard monthly
@@ -302,7 +358,8 @@ async def reserve_managed_action(request, minutes, job_id, job_type):
 async def require_managed_entitlement(request):
     """Gate a managed compute endpoint that doesn't resolve a Gemini key itself.
 
-    Some endpoints (subtitle/hook FFmpeg re-encodes, render proxy) do expensive server work
+    Some endpoints (subtitle/hook FFmpeg re-encodes, render proxy, the thumbnail
+    upload that kicks off a YouTube download + transcription) do expensive server work
     without ever calling ``resolve_gemini``, so nothing was stopping an anonymous
     or non-entitled caller from driving unbounded compute in cloud mode. In cloud
     mode this rejects them with 402; it's a no-op for self-host (BILLING off).
@@ -344,8 +401,22 @@ async def _assert_job_owner(request, record):
     if user is None or str(user.id) != str(owner):
         raise HTTPException(status_code=404, detail="Not found")
 
-# Application State lives in state.py (single shared seam for jobs/queue).
-from state import _enqueue_job, concurrency_semaphore, job_queue, jobs
+# Application State
+# PriorityQueue holds (priority, seq, job_id). Lower priority dispatches first:
+# pro=0, starter/creator=1, BYOK/anonymous/self-host=2. The seq counter keeps
+# FIFO order within a priority and makes the tuples always comparable. With
+# BILLING disabled every job enqueues at priority 2 → plain FIFO as before.
+job_queue = asyncio.PriorityQueue()
+_job_seq = itertools.count()
+jobs: Dict[str, Dict] = {}
+thumbnail_sessions: Dict[str, Dict] = {}
+publish_jobs: Dict[str, Dict] = {}  # {publish_id: {status, result, error}}
+# Semester to limit concurrency to MAX_CONCURRENT_JOBS
+concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+
+
+def _enqueue_job(job_id: str, priority: int = 2):
+    job_queue.put_nowait((priority, next(_job_seq), job_id))
 
 def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     """
@@ -466,9 +537,6 @@ def _reapply_captions(job_id, clip_index, video_path):
         if not transcript or clip_index >= len(clips):
             return None
         clip = clips[clip_index]
-        if clip.get('subtitle_removed'):
-            return video_path
-        style_override = clip.get('subtitle_style')
         import main as _main
         # A recut clip is a concatenation of source segments, so the flat
         # start..end window is wrong for it — caption against the clip-relative
@@ -478,11 +546,9 @@ def _reapply_captions(job_id, clip_index, video_path):
             v_transcript = recut.virtual_transcript(transcript, recipe_segments)
             return _main.auto_caption_clip(
                 video_path, v_transcript, 0.0,
-                recut.total_duration(recipe_segments),
-                style_override=style_override)
+                recut.total_duration(recipe_segments))
         return _main.auto_caption_clip(video_path, transcript,
-                                       clip['start'], clip['end'],
-                                       style_override=style_override)
+                                       clip['start'], clip['end'])
     except Exception as e:
         print(f"⚠️  Could not re-apply captions to {video_path}: {e}")
         return None
@@ -721,8 +787,11 @@ def _enforce_output_size_cap():
     used = _dir_size(OUTPUT_DIR)
     if used <= cap:
         return
+    thumbs = os.path.basename(THUMBNAILS_DIR)
     candidates = []
     for job_id in os.listdir(OUTPUT_DIR):
+        if job_id == thumbs:
+            continue
         p = os.path.join(OUTPUT_DIR, job_id)
         if os.path.isdir(p):
             try:
@@ -753,6 +822,10 @@ async def cleanup_jobs():
             # Simple directory cleanup based on modification time
             # Check OUTPUT_DIR
             for job_id in os.listdir(OUTPUT_DIR):
+                # Not a job: the thumbnails dir backs a StaticFiles mount, so
+                # deleting it would 500 every /thumbnails request until reboot.
+                if job_id == os.path.basename(THUMBNAILS_DIR):
+                    continue
                 job_path = os.path.join(OUTPUT_DIR, job_id)
                 if os.path.isdir(job_path):
                     if now - os.path.getmtime(job_path) > JOB_RETENTION_SECONDS:
@@ -768,6 +841,20 @@ async def cleanup_jobs():
             # on demand, so this only costs a re-download.
             _enforce_output_size_cap()
             _enforce_uploads_size_cap()
+
+            # Cleanup SaaSShorts jobs from memory
+            try:
+                saas_expired = [
+                    jid for jid, jdata in list(saas_jobs.items())
+                    if jdata.get("status") in ("completed", "failed")
+                    and jdata.get("output_dir")
+                    and os.path.isdir(jdata["output_dir"])
+                    and now - os.path.getmtime(jdata["output_dir"]) > JOB_RETENTION_SECONDS
+                ]
+                for jid in saas_expired:
+                    del saas_jobs[jid]
+            except NameError:
+                pass
 
             # Cleanup Uploads
             for filename in os.listdir(UPLOAD_DIR):
@@ -1185,15 +1272,6 @@ if BILLING_ENABLED:
 import mcp_server as _mcp_server
 app.include_router(_mcp_server.router)
 
-# Local route clusters (each module exposes only `router`). Registration order
-# is safe: none of these paths collide with the job-core routes below.
-from routers import gallery as _gallery_routes
-from routers import social as _social_routes
-from routers import system as _system_routes
-app.include_router(_system_routes.router)
-app.include_router(_gallery_routes.router)
-app.include_router(_social_routes.router)
-
 # Enable CORS for frontend. Cloud mode locks this down to the configured origins;
 # self-host keeps the permissive wildcard it has always used.
 app.add_middleware(
@@ -1207,6 +1285,10 @@ app.add_middleware(
 # Mount static files for serving videos
 app.mount("/videos", StaticFiles(directory=OUTPUT_DIR), name="videos")
 
+# Mount static files for serving thumbnails
+THUMBNAILS_DIR = os.path.join(OUTPUT_DIR, "thumbnails")
+os.makedirs(THUMBNAILS_DIR, exist_ok=True)
+app.mount("/thumbnails", StaticFiles(directory=THUMBNAILS_DIR), name="thumbnails")
 
 
 def _safe_under(base_dir: str, user_rel_path: str) -> Optional[str]:
@@ -1400,7 +1482,216 @@ async def run_job(job_id, job_data):
         # inside a yt-dlp/httpx error) — scrub before it reaches client logs.
         jobs[job_id]['logs'].append(_scrub_secrets(f"Execution error: {str(e)}"))
 
-# System routes (health/config/env/models) live in routers/system.py.
+@app.get("/health")
+async def health():
+    """Lightweight liveness probe for uptime monitoring / Coolify health checks."""
+    return {"status": "ok"}
+
+@app.get("/api/config")
+async def get_config():
+    return {
+        "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
+        "billingEnabled": BILLING_ENABLED,
+        "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
+        "jobRetentionSeconds": JOB_RETENTION_SECONDS,
+        "openRouterEnabled": True,
+        "defaultOpenRouterModel": os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
+    }
+
+
+# ---- Env-file sync (project follows .env, dashboard writes it) --------------
+import env_manager as _envm
+
+
+@app.get("/api/env")
+async def get_env():
+    """Return the live env file snapshot (secrets masked). The file is the
+    source of truth — a manual edit is returned on the next GET without a
+    restart, and the dashboard's PUT persists through restarts."""
+    # Reload file into process env so a manual edit is seen live (project follows .env)
+    try:
+        from dotenv import load_dotenv as _ld
+        _ld(str(_envm.ENV_PATH), override=True)
+        # If the file changed GPU-relevant keys, drop memoised probes so next
+        # job sees the new value without a restart
+        import ffmpeg_utils as _fu
+        _fu.reset_encoder_cache()
+    except Exception:
+        pass
+    masked, secrets_set, raw = _envm.masked_snapshot()
+    return {
+        "env": masked,
+        "secretsSet": secrets_set,
+        "allowed": sorted(_envm.ALLOWED_ENV),
+        "fileExists": _envm.env_file_exists(),
+        "path": str(_envm.ENV_PATH),
+    }
+
+
+class EnvUpdateBody(BaseModel):
+    updates: Dict[str, Any]
+
+
+@app.put("/api/env")
+async def put_env(body: EnvUpdateBody):
+    raw_updates = {k.strip(): ("" if v is None else str(v)) for k, v in (body.updates or {}).items() if k.strip()}
+    if not raw_updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+    # Only allowlisted keys
+    unknown = [k for k in raw_updates if k not in _envm.ALLOWED_ENV]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Keys not writable via API: {', '.join(unknown)}")
+    errors = _envm.validate_updates(raw_updates)
+    if errors:
+        raise HTTPException(status_code=400, detail={"validation": errors})
+    _envm.apply_updates(raw_updates)
+    masked, secrets_set, raw = _envm.masked_snapshot()
+    return {"ok": True, "env": masked, "secretsSet": secrets_set}
+
+
+class AITestBody(BaseModel):
+    # Draft values from the settings form, so the button tests what the user
+    # typed before it is saved. Keys must be in ALLOWED_ENV; anything missing
+    # falls back to the live .env values.
+    updates: Dict[str, str] = {}
+
+
+@app.post("/api/ai/test")
+async def test_ai_connection(body: AITestBody):
+    """Ping the configured AI provider with a tiny completion.
+
+    Tests exactly what the clip pipeline would use: AI_PROVIDER picks the
+    backend ('auto' = OpenRouter when its key is set, else Gemini), and draft
+    values from the settings form override the saved .env so credentials can
+    be verified before they are persisted. Returns
+    {ok, provider, model, latencyMs, detail | error}."""
+    draft = {k.strip(): str(v).strip() for k, v in (body.updates or {}).items()
+             if k.strip() in _envm.ALLOWED_ENV and v is not None and str(v).strip()}
+
+    def cfg(key: str) -> str:
+        return draft.get(key) or (os.environ.get(key) or "").strip()
+
+    provider = (cfg("AI_PROVIDER") or "auto").lower()
+
+    def ping(base_url: str, api_key: str, model: str):
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key or "no-key", base_url=base_url, timeout=45.0)
+        t0 = time.time()
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Reply with the single word: ok"}],
+            # No temperature (some reasoning endpoints reject 0) and a token
+            # ceiling high enough that reasoning models still emit text.
+            max_tokens=512,
+        )
+        ms = int((time.time() - t0) * 1000)
+        text = ""
+        if resp.choices:
+            text = (resp.choices[0].message.content or "").strip()
+        return {"ok": True, "provider": provider, "model": model,
+                "latencyMs": ms, "detail": text[:120] or "(empty reply)"}
+
+    try:
+        if provider == "custom":
+            base = cfg("AI_BASE_URL")
+            if not base:
+                return {"ok": False, "provider": provider, "error": "AI_BASE_URL is not set"}
+            if not cfg("AI_MODEL"):
+                return {"ok": False, "provider": provider, "error": "AI_MODEL is not set"}
+            return ping(base, cfg("AI_API_KEY"), cfg("AI_MODEL"))
+        if provider == "ollama":
+            base = (cfg("OLLAMA_URL") or "http://localhost:11434").rstrip("/") + "/v1"
+            return ping(base, "ollama", cfg("OLLAMA_MODEL") or "lfm3-vl:2b-q4_K_M")
+        if provider in ("openrouter", "auto"):
+            key = cfg("OPENROUTER_API_KEY")
+            if key:
+                from openrouter_client import OPENROUTER_BASE
+                return ping(OPENROUTER_BASE, key, cfg("OPENROUTER_MODEL") or "openrouter/free")
+            if provider == "openrouter":
+                return {"ok": False, "provider": provider, "error": "OPENROUTER_API_KEY is not set"}
+            # auto falls through to Gemini when no OpenRouter key is set
+        if provider in ("gemini", "auto"):
+            key = cfg("GEMINI_API_KEY")
+            if not key:
+                return {"ok": False, "provider": provider,
+                        "error": "no key configured (set OPENROUTER_API_KEY or GEMINI_API_KEY)"}
+            return ping("https://generativelanguage.googleapis.com/v1beta/openai/",
+                        key, cfg("GEMINI_MODEL") or "gemini-2.5-flash-lite")
+        return {"ok": False, "provider": provider, "error": f"unknown AI_PROVIDER '{provider}'"}
+    except Exception as e:
+        return {"ok": False, "provider": provider,
+                "error": f"{type(e).__name__}: {e}"[:400]}
+
+
+# Cache for OpenRouter free models (1 hour). Avoids hammering the API on every settings open.
+_OR_MODELS_CACHE = {"time": 0, "data": []}
+
+
+@app.get("/api/openrouter/models")
+async def list_openrouter_models(request: Request):
+    """Auto-detect free models from OpenRouter. Uses the caller's key if provided,
+    otherwise the server's env key, otherwise tries unauthenticated (public list is often allowed).
+    Returns {models: [{id, name, pricing}], cached: bool}."""
+    import httpx as _httpx
+
+    # Prefer caller's key (header) so free-detection works even before env is set
+    api_key = None
+    for hdr in ("X-OpenRouter-Key", "X-OpenRouter-API-Key", "X-Gemini-Key"):
+        v = request.headers.get(hdr)
+        if v and v.strip().startswith("sk-or-"):
+            api_key = v.strip()
+            break
+    if not api_key:
+        api_key = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_KEY") or "").strip() or None
+
+    # Serve from cache if fresh (60 min)
+    now = time.time()
+    if _OR_MODELS_CACHE["data"] and now - _OR_MODELS_CACHE["time"] < 3600:
+        return {"models": _OR_MODELS_CACHE["data"], "cached": True, "count": len(_OR_MODELS_CACHE["data"])}
+
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    # OpenRouter recommends these but not required for models list
+    headers["HTTP-Referer"] = os.environ.get("OPENROUTER_REFERER", "http://localhost:5175")
+    headers["X-Title"] = os.environ.get("OPENROUTER_TITLE", "OpenShorts")
+
+    try:
+        async with _httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://openrouter.ai/api/v1/models", headers=headers)
+            # 401 on free list often still returns data; if 401 fallback to unauthenticated try
+            if resp.status_code == 401 and api_key:
+                async with _httpx.AsyncClient(timeout=15) as c2:
+                    resp = await c2.get("https://openrouter.ai/api/v1/models", headers={
+                        "HTTP-Referer": headers["HTTP-Referer"], "X-Title": headers["X-Title"]
+                    })
+            resp.raise_for_status()
+            data = resp.json()
+            all_models = data.get("data", []) if isinstance(data, dict) else []
+            free = []
+            for m in all_models:
+                mid = m.get("id") or ""
+                pricing = m.get("pricing") or {}
+                # Free = :free suffix OR prompt+completion == 0
+                is_free = mid.endswith(":free") or (pricing.get("prompt") == "0" and pricing.get("completion") == "0")
+                if is_free:
+                    free.append({
+                        "id": mid,
+                        "name": m.get("name") or mid,
+                        "pricing": pricing,
+                        "context_length": m.get("context_length"),
+                    })
+            # Sort: :free first, then by name
+            free.sort(key=lambda x: (0 if x["id"].endswith(":free") else 1, x["id"]))
+            # Cache
+            _OR_MODELS_CACHE["time"] = now
+            _OR_MODELS_CACHE["data"] = free
+            return {"models": free, "cached": False, "count": len(free)}
+    except Exception as e:
+        # On error, return cached if any, else empty with error
+        if _OR_MODELS_CACHE["data"]:
+            return {"models": _OR_MODELS_CACHE["data"], "cached": True, "count": len(_OR_MODELS_CACHE["data"]), "warning": str(e)[:200]}
+        raise HTTPException(status_code=502, detail=f"Could not fetch OpenRouter models: {e}")
 
 async def _probe_youtube_quality(url: str) -> dict:
     """Run quality_probe.py in a worker thread; {} on any failure (fail-open)."""
@@ -1438,7 +1729,53 @@ def _reject_short_source(duration: float):
         f"short-form content."))
 
 
-# Layout allow-list (LAYOUT_ENV/LAYOUT_IMPLIES/layout_env) lives in config.py.
+# Layouts the caller can let the renderer choose from, mapped to the env var
+# each one is gated on. The renderer only ever picks between layouts that are
+# switched on here.
+#
+# This is opt-in per job, not a detector running on every video, because the
+# detection is not good enough to be trusted unprompted: measured over the
+# 48-clip corpus, routing every video through the on-screen-content check fixed
+# 13 clips and spoiled 13 others (talking heads and corner tickers demoted to a
+# layout they do not need). Asking the person who knows what they uploaded costs
+# them one click and removes that whole class of error. It is also what OpusClip
+# does — its "applicable auto layout" panel lets the user pick which layouts the
+# AI may apply.
+LAYOUT_ENV = {
+    "split": "SPLIT_LAYOUT",          # two speakers stacked
+    "screencast": "SCREENCAST_LAYOUT",  # slides/screen share over the speaker
+    "speaker_cut": "SPEAKER_CUT",     # hard cuts to whoever is talking
+    "punch_in": "PUNCH_IN",           # small push on the clip's beats
+}
+
+# Stacking and cutting both need to know who is speaking.
+LAYOUT_IMPLIES = {
+    "split": ["SPEAKER_SIGNAL"],
+    "speaker_cut": ["SPEAKER_SIGNAL"],
+}
+
+
+def layout_env(requested):
+    """Env overrides for the layouts this job allows. Unknown names are ignored
+    rather than rejected: a newer dashboard must not break an older API.
+
+    The special value "auto" hands the choice to Gemini (one call per video).
+    It composes with explicit picks: layout_picker only ever adds, so asking for
+    "auto,punch_in" means "decide the layout yourself, and punch in regardless".
+    """
+    env = {}
+    for name in requested or []:
+        key = str(name).strip().lower()
+        if key == "auto":
+            env["AUTO_LAYOUT"] = "1"
+            continue
+        var = LAYOUT_ENV.get(key)
+        if not var:
+            continue
+        env[var] = "1"
+        for extra in LAYOUT_IMPLIES.get(key, []):
+            env[extra] = "1"
+    return env
 
 
 @app.post("/api/process")
@@ -1457,7 +1794,7 @@ async def process_endpoint(
     clip_max_seconds: Optional[str] = Form(None),
     auto_hook: Optional[str] = Form(None),
     auto_hook_style: Optional[str] = Form(None),
-    transcript: Optional[UploadFile] = File(None)
+    thumbnail_session_id: Optional[str] = Form(None)
 ):
     api_key = await resolve_gemini(request)
     if not api_key:
@@ -1482,6 +1819,7 @@ async def process_endpoint(
         clip_max_seconds = body.get("clip_max_seconds")
         auto_hook = body.get("auto_hook")
         auto_hook_style = body.get("auto_hook_style")
+        thumbnail_session_id = body.get("thumbnail_session_id")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -1493,8 +1831,20 @@ async def process_endpoint(
     elif not isinstance(layouts, list):
         layouts = []
 
+    # Module handover (issue #68): reuse the Thumbnail Studio source video and
+    # its transcript so publishing to YouTube can flow straight into clip
+    # generation without re-uploading or re-transcribing.
+    thumb_session = None
+    if thumbnail_session_id and not url and not file:
+        thumb_session = thumbnail_sessions.get(thumbnail_session_id)
+        if not thumb_session:
+            raise HTTPException(status_code=404, detail="Thumbnail session not found or expired")
+        await _assert_job_owner(request, thumb_session)
+        src = thumb_session.get("video_path")
+        if not src or not os.path.exists(src):
+            raise HTTPException(status_code=404, detail="Source video for this session is no longer on disk")
 
-    if not url and not file:
+    if not url and not file and not thumb_session:
         raise HTTPException(status_code=400, detail="Must provide URL or File")
 
     # Completion callback: reject unsafe targets NOW (clear 400) — delivery
@@ -1549,7 +1899,7 @@ async def process_endpoint(
         "ip": client_ip,
         "user_agent": user_agent,
         "timestamp": time.time(),
-        "source": "url" if url else "file",
+        "source": "thumbnail_session" if thumb_session else ("url" if url else "file"),
     }
 
     job_id = str(uuid.uuid4())
@@ -1559,23 +1909,23 @@ async def process_endpoint(
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
     env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    # Route the key and model to the right provider:
-    # Ollama / OpenAI-compatible models set LLM_PROVIDER, LLM_BASE_URL, LLM_MODEL, LLM_API_KEY.
-    # Gemini sets GEMINI_API_KEY.
+    # Route the key to the right provider: OpenRouter keys go to OPENROUTER_API_KEY,
+    # Gemini keys to GEMINI_API_KEY. When the key looks like OpenRouter, also mirror
+    # it to GEMINI_API_KEY so legacy code paths that only check that var still see a key,
+    # but set OPENROUTER_API_KEY as the authoritative one.
     provider = _resolve_ai_provider(request)
-    if provider in ("ollama", "openai_compatible", "openai"):
-        base_url, model_for_job, key_for_job = _resolve_llm_config(request)
-        env["LLM_PROVIDER"] = provider
-        env["LLM_BASE_URL"] = base_url
-        env["LLM_MODEL"] = model_for_job
-        env["LLM_API_KEY"] = key_for_job
-        env["GEMINI_API_KEY"] = key_for_job  # keep legacy fallback happy
-        print(f"[ai-provider] job={job_id} provider={provider} model={model_for_job} base_url={base_url}")
+    model_for_job = _resolve_openrouter_model(request) if provider == "openrouter" else ""
+    if provider == "openrouter":
+        env["OPENROUTER_API_KEY"] = api_key
+        env["GEMINI_API_KEY"] = api_key  # keep legacy fallback happy
+        env["OPENROUTER_MODEL"] = model_for_job
+        # Clear any stale Gemini model env that would shadow the OR model
+        # (main.py checks OPENROUTER_MODEL first when provider is OR)
+        print(f"[ai-provider] job={job_id} provider=openrouter model={model_for_job}")
     else:
-        env["LLM_PROVIDER"] = "gemini"
         env["GEMINI_API_KEY"] = api_key
-        env.pop("LLM_BASE_URL", None)
+        # Ensure OpenRouter not accidentally triggered by stale env
+        env.pop("OPENROUTER_API_KEY", None)
         print(f"[ai-provider] job={job_id} provider=gemini")
 
     # Optional layouts are per job. The renderer reads these at import time in
@@ -1632,36 +1982,33 @@ async def process_endpoint(
         print(f"[gen-controls] job={job_id} clips={n_clips} band={min_secs}-{max_secs}")
 
     input_path = None
-    # User-supplied transcript (Whisper removed): .srt / .vtt / .txt / .md /
-    # .json. Saved into the job dir and forwarded as --transcript; works for
-    # uploads and URL sources alike (multipart form carries both).
-    TRANSCRIPT_EXTS = {".srt", ".vtt", ".txt", ".md", ".markdown", ".json"}
-    transcript_path = None
-    if transcript and transcript.filename:
-        ext = os.path.splitext(transcript.filename or "")[1].lower()
-        if ext not in TRANSCRIPT_EXTS:
-            shutil.rmtree(job_output_dir, ignore_errors=True)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Transcript must be one of: {sorted(TRANSCRIPT_EXTS)}")
-        transcript_path = os.path.join(job_output_dir, f"source_transcript{ext}")
-        tsize = 0
-        with open(transcript_path, "wb") as tbuf:
-            while chunk := await transcript.read(1024 * 256):
-                tsize += len(chunk)
-                if tsize > 5 * 1024 * 1024:
-                    shutil.rmtree(job_output_dir, ignore_errors=True)
-                    raise HTTPException(status_code=413,
-                                        detail="Transcript file too large (max 5MB)")
-                tbuf.write(chunk)
-        if tsize == 0:
-            shutil.rmtree(job_output_dir, ignore_errors=True)
-            raise HTTPException(status_code=400, detail="Transcript file is empty")
     if url:
         # Keep the downloaded source inside the job dir: the clip editor's
         # re-render path cuts new segments from it, and it ages out with the
         # rest of the job (retention window + OUTPUT_MAX_GB cap) either way.
         cmd.extend(["-u", url, "--keep-original"])
+    elif thumb_session:
+        # Hardlink (or copy) the session's video under the job's name so source
+        # lookup, the clip editor and the preview treat it exactly like a normal
+        # upload; the transcript rides along so the pipeline skips transcription.
+        src = thumb_session["video_path"]
+        src_duration = _media_duration_seconds(src)
+        if MIN_SOURCE_SECONDS > 0 and 0 < src_duration < MIN_SOURCE_SECONDS:
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            _reject_short_source(src_duration)
+        input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{os.path.basename(src)}")
+        try:
+            os.link(src, input_path)
+        except OSError:
+            shutil.copyfile(src, input_path)
+        cmd.extend(["-i", input_path])
+        # An empty transcript (e.g. a silent or music-only source) is not worth
+        # forwarding: main.py would reject it and retranscribe anyway.
+        if thumb_session.get("transcript_ready") and (thumb_session.get("transcript") or {}).get("segments"):
+            transcript_path = os.path.join(job_output_dir, "source_transcript.json")
+            with open(transcript_path, "w") as f:
+                json.dump(thumb_session["transcript"], f)
+            cmd.extend(["--transcript", transcript_path])
     else:
         # Save uploaded file with size limit check.
         # basename() strips any path components from the client-supplied
@@ -1689,18 +2036,6 @@ async def process_endpoint(
             _reject_short_source(upload_duration)
 
         cmd.extend(["-i", input_path])
-
-    # With Whisper gone a transcript is required — fail fast here instead of
-    # burning a job that main.py rejects.
-    if transcript_path:
-        cmd.extend(["--transcript", transcript_path])
-    else:
-        shutil.rmtree(job_output_dir, ignore_errors=True)
-        if input_path and os.path.exists(input_path):
-            os.remove(input_path)
-        raise HTTPException(
-            status_code=400,
-            detail="A transcript file is required (.srt, .vtt, .txt, .md or .json) — auto-transcription was removed.")
 
     cmd.extend(["-o", job_output_dir])
     if output_format and output_format != "auto":
@@ -2004,9 +2339,10 @@ async def _ensure_job_files(job_id: str, request: Request) -> bool:
 
 
 from editor import VideoEditor
-from subtitles import generate_srt, generate_ass, burn_subtitles
+from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_from_video, default_font_size
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
+from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
 
 class EditRequest(BaseModel):
     job_id: str
@@ -2197,15 +2533,15 @@ class SubtitleRequest(BaseModel):
     job_id: str
     clip_index: int
     position: str = "bottom" # top, middle, bottom
-    font_size: int = 13
+    font_size: int = 16
     font_name: str = "Verdana"
     font_color: str = "#FFFFFF"
     border_color: str = "#000000"
-    border_width: int = 1
+    border_width: int = 2
     bg_color: str = "#000000"
     bg_opacity: float = 0.0
     style: str = "classic"  # classic (uniform color) or karaoke (word highlight)
-    highlight_color: str = "#3B5BFF"
+    highlight_color: str = "#FFD700"
     effect: str = "none"  # none | glow | pop | box (karaoke only)
     base_opacity: float = 1.0  # opacity of non-active words (dimmed modern look)
     uppercase: bool = False
@@ -2214,10 +2550,6 @@ class SubtitleRequest(BaseModel):
     # instead of regenerating from the stored transcript — without this, text
     # edits in the modal were silently discarded on the server render path.
     words: Optional[List[CaptionWordIn]] = None
-    # Manual sync nudge in seconds (positive = captions later). Clamped to
-    # ±5s; applied to word times before clipping. For transcripts whose
-    # timestamps drift from the audio (typical with evenly-spread .txt/.md).
-    time_offset: float = 0.0
 
 
 @app.get("/api/clip/{job_id}/{clip_index}/transcript")
@@ -2274,6 +2606,9 @@ async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
         "captions": captions,
         "durationSec": duration_sec,
         "language": transcript.get('language', 'en'),
+        # The subtitle modal previews at this size and burns with it too, so
+        # the preview matches the exported file (CAPTION_FONT_SIZE from .env).
+        "defaultFontSize": default_font_size(),
     }
 
 
@@ -2523,23 +2858,20 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
                     if req.reapply_captions else None)
 
     def run_recut():
-        style_override = clip.get('subtitle_style')
         if fast:
             return recut.perform_recut(
                 input_path=canonical_path,
                 segments=recut.rebase_segments(
                     segments, canonical_range['start'], canonical_range['end']),
                 output_dir=output_dir, clean_name=clean_name,
-                reframe=False, captions_transcript=v_transcript,
-                style_override=style_override)
+                reframe=False, captions_transcript=v_transcript)
         return recut.perform_recut(
             input_path=source_path, segments=segments,
             output_dir=output_dir, clean_name=clean_name,
             reframe=True, output_format=data.get('output_format', 'auto'),
             watermark=bool(job.get('watermark')),
             force_strategy=force_strategy,
-            captions_transcript=v_transcript,
-            style_override=style_override)
+            captions_transcript=v_transcript)
 
     try:
         loop = asyncio.get_event_loop()
@@ -3201,9 +3533,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         border_width=req.border_width, highlight_color=req.highlight_color,
         bg_color=req.bg_color, bg_opacity=req.bg_opacity,
         effect=req.effect, base_opacity=req.base_opacity, uppercase=req.uppercase,
-        time_offset=max(-5.0, min(5.0, float(req.time_offset or 0.0))),
     )
-    srt_time_offset = karaoke_opts["time_offset"]
 
     # Output video
     # We create a new file "subtitled_..."
@@ -3220,22 +3550,30 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
     # 25-jul-2026). The endpoint is already gated by require_managed_entitlement
     # above, so this is not an open door.
     #
-    # The dubbed path is gone with auto-transcription: dubbed clips use the
-    # stored transcript like every other clip.
+    # The dubbed path is the exception and keeps the charge: it runs a fresh
+    # ASR over the translated audio, which is real work.
+    is_dubbed = filename.startswith("translated_")
     subtitle_minutes = (_cloud_config.subtitle_minutes_for(filename)
                         if BILLING_ENABLED else 0)
     reservation_id = await reserve_managed_action(
         request, subtitle_minutes, req.job_id, "subtitle")
 
     try:
-        # 1. Generate SRT from the existing transcript. (Auto-transcription
-        # was removed, so dubbed videos use the stored transcript like every
-        # other clip — plus the modal's time_offset when its timing drifts.)
-        if is_karaoke:
+        # 1. Generate SRT — from the existing transcript, or a fresh
+        # transcription when the audio was dubbed (see the metering note above).
+        if is_dubbed:
+            print(f"🎙️ Dubbed video detected, transcribing audio for subtitles...")
+            def run_transcribe_srt():
+                if is_karaoke:
+                    return generate_srt_from_video(input_path, srt_path, style="karaoke", **karaoke_opts)
+                return generate_srt_from_video(input_path, srt_path)
+
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(None, run_transcribe_srt)
+        elif is_karaoke:
             success = generate_ass(sub_transcript, sub_start, sub_end, srt_path, **karaoke_opts)
         else:
-            success = generate_srt(sub_transcript, sub_start, sub_end, srt_path,
-                                   time_offset=srt_time_offset)
+            success = generate_srt(sub_transcript, sub_start, sub_end, srt_path)
 
         if not success:
              raise HTTPException(status_code=400, detail="No words found for this clip range.")
@@ -3262,18 +3600,14 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         await _metering.commit_reservation(reservation_id)
 
     # 3. Update Result and Metadata
-    sub_updates = {
-        'video_url': f"/videos/{req.job_id}/{output_filename}",
-        'subtitle_style': karaoke_opts,
-        'subtitle_removed': False,
-    }
+    # Update InMemory Jobs
     if req.clip_index < len(job['result']['clips']):
-         job['result']['clips'][req.clip_index].update(sub_updates)
+         job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
     
     # Update Metadata on Disk (Persistence)
     try:
         if req.clip_index < len(clips):
-            clips[req.clip_index].update(sub_updates)
+            clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
             # Update the main data structure
             data['shorts'] = clips
             
@@ -3342,20 +3676,13 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
                             detail="The original clip is no longer available.")
 
     new_url = f"/videos/{req.job_id}/{filename}"
-    rem_updates = {
-        'video_url': new_url,
-        'subtitle_removed': True,
-    }
+    if req.clip_index < len(job.get('result', {}).get('clips', [])):
+        job['result']['clips'][req.clip_index]['video_url'] = new_url
     try:
-        if req.clip_index < len(job.get('result', {}).get('clips', [])):
-            job['result']['clips'][req.clip_index].update(rem_updates)
-            job['result']['clips'][req.clip_index].pop('subtitle_style', None)
-        if req.clip_index < len(clips):
-            clips[req.clip_index].update(rem_updates)
-            clips[req.clip_index].pop('subtitle_style', None)
-            data['shorts'] = clips
-            with open(json_files[0], 'w') as f:
-                json.dump(data, f, indent=4)
+        clips[req.clip_index]['video_url'] = new_url
+        data['shorts'] = clips
+        with open(json_files[0], 'w') as f:
+            json.dump(data, f, indent=4)
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
 
@@ -3608,7 +3935,1567 @@ async def translate_clip(
         "new_video_url": f"/videos/{req.job_id}/{output_filename}"
     }
 
-# Social distribution routes live in routers/social.py.
+class SocialPostRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    api_key: Optional[str] = None  # BYOK; ignored for managed users
+    user_id: Optional[str] = None  # BYOK profile; ignored for managed users
+    platforms: List[str] # ["tiktok", "instagram", "youtube"]
+    # Optional overrides if frontend wants to edit them
+    title: Optional[str] = None
+    description: Optional[str] = None
+    scheduled_date: Optional[str] = None # ISO-8601 string
+    timezone: Optional[str] = "UTC"
+
+import httpx
+
+@app.post("/api/social/post")
+async def post_to_socials(req: SocialPostRequest, request: Request):
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Resolve the Upload-Post key + profile. For managed users the server key is
+    # used and their own profile is forced (body api_key / user_id are ignored).
+    upload_key, forced_profile = await resolve_upload_post(request, req.api_key)
+    if not upload_key:
+        raise HTTPException(status_code=400, detail="Missing Upload-Post API key")
+    post_user = resolve_post_profile(forced_profile, req.user_id)
+
+    job = jobs[req.job_id]
+    await _assert_job_owner(request, job)
+    if 'result' not in job or 'clips' not in job['result']:
+        raise HTTPException(status_code=400, detail="Job result not available")
+
+    try:
+        clip = job['result']['clips'][req.clip_index]
+        # Video URL is relative /videos/..., we need absolute file path
+        # clip['video_url'] is like "/videos/{job_id}/{filename}"
+        # We constructed it as: f"/videos/{job_id}/{clip_filename}"
+        # And file is at f"{OUTPUT_DIR}/{job_id}/{clip_filename}"
+        
+        filename = clip['video_url'].split('/')[-1]
+        file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
+        
+        if not os.path.exists(file_path):
+             raise HTTPException(status_code=404, detail=f"Video file not found: {file_path}")
+
+        # Construct parameters for Upload-Post API
+        # Fallbacks
+        final_title = req.title or clip.get('title', 'Viral Short')
+        final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
+        
+        # Prepare form data
+        url = "https://api.upload-post.com/api/upload"
+        headers = {
+            "Authorization": f"Apikey {upload_key}"
+        }
+
+        # Prepare data as dict (httpx handles lists for multiple values)
+        data_payload = {
+            "user": post_user,
+            "title": final_title,
+            "platform[]": req.platforms, # Pass list directly
+            "async_upload": "true"  # Enable async upload
+        }
+
+        # Add scheduling if present
+        if req.scheduled_date:
+            data_payload["scheduled_date"] = req.scheduled_date
+            if req.timezone:
+                data_payload["timezone"] = req.timezone
+        
+        # Add Platform specifics
+        if "tiktok" in req.platforms:
+             data_payload["tiktok_title"] = final_description
+             data_payload["post_mode"] = TIKTOK_POST_MODE
+             
+        if "instagram" in req.platforms:
+             data_payload["instagram_title"] = final_description
+             data_payload["media_type"] = "REELS"
+
+        if "youtube" in req.platforms:
+             yt_title = req.title or clip.get('video_title_for_youtube_short', final_title)
+             data_payload["youtube_title"] = yt_title
+             data_payload["youtube_description"] = final_description
+             data_payload["privacyStatus"] = "public"
+
+        # Send File
+        # httpx AsyncClient requires async file reading or bytes. 
+        # Since we have MAX_FILE_SIZE_MB, reading into memory is safe-ish.
+        with open(file_path, "rb") as f:
+            file_content = f.read()
+            
+        files = {
+            "video": (filename, file_content, "video/mp4")
+        }
+
+        # Switch to synchronous Client to avoid "sync request with AsyncClient" error with multipart/files
+        with httpx.Client(timeout=120.0) as client:
+            print(f"📡 Sending to Upload-Post for platforms: {req.platforms}")
+            response = client.post(url, headers=headers, data=data_payload, files=files)
+            
+        if response.status_code not in [200, 201, 202]: # Added 201
+             print(f"❌ Upload-Post Error: {response.text}")
+             raise HTTPException(status_code=response.status_code, detail=f"Vendor API Error: {response.text}")
+
+        return response.json()
+
+    except Exception as e:
+        print(f"❌ Social Post Exception: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/social/user")
+async def get_social_user(request: Request):
+    """Proxy to fetch user profiles from Upload-Post.
+
+    BYOK: uses the caller's key and returns all profiles on that account.
+    Managed: uses the server key but returns ONLY the caller's own profile.
+    """
+    api_key, forced_profile = await resolve_upload_post(request, None)
+    if not api_key:
+         raise HTTPException(status_code=400, detail="Missing X-Upload-Post-Key header")
+
+    url = "https://api.upload-post.com/api/uploadposts/users"
+    print(f"🔍 Fetching User ID from: {url}")
+    headers = {"Authorization": f"Apikey {api_key}"}
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                print(f"❌ Upload-Post User Fetch Error: {resp.text}")
+                raise HTTPException(status_code=resp.status_code, detail=f"Failed to fetch user: {resp.text}")
+            
+            data = resp.json()
+            print(f"🔍 Upload-Post User Response: {data}")
+            
+            user_id = None
+            # The structure is {'success': True, 'profiles': [{'username': '...'}, ...]}
+            profiles_list = []
+            if isinstance(data, dict):
+                 raw_profiles = data.get('profiles', [])
+                 if isinstance(raw_profiles, list):
+                     for p in raw_profiles:
+                         username = p.get('username')
+                         if username:
+                             # Determine connected platforms
+                             socials = p.get('social_accounts', {})
+                             connected = []
+                             # Check typical platforms
+                             for platform in ['tiktok', 'instagram', 'youtube']:
+                                 account_info = socials.get(platform)
+                                 # If it's a dict and typically has data, or just not empty string
+                                 if isinstance(account_info, dict):
+                                     connected.append(platform)
+                             
+                             profiles_list.append({
+                                 "username": username,
+                                 "connected": connected
+                             })
+            
+            # Managed users must only ever see their own profile.
+            if forced_profile is not None:
+                profiles_list = [p for p in profiles_list if p.get("username") == forced_profile]
+
+            if not profiles_list:
+                # Fallback if no profiles found
+                return {"profiles": [], "error": "No profiles found"}
+
+            return {"profiles": profiles_list}
+            
+            
+        except Exception as e:
+             raise HTTPException(status_code=500, detail=str(e))
 
 
-# SEO gallery pages (/gallery, /video/{id}) live in routers/gallery.py.
+# --- Social analytics (thin proxies over Upload-Post) ---
+# Read-only mirrors of the posting flow above: managed users are locked to their
+# own profile (the body/query profile is ignored), BYOK callers bring their own
+# key and pick the profile with ?user=.
+
+# Separate bucket from _probe_times: analytics polling must not eat into the
+# metering-probe allowance, and vice versa. Protects the managed Upload-Post
+# key's vendor rate limits from a runaway polling loop.
+_analytics_times: dict = {}  # user_id -> [monotonic timestamps]
+ANALYTICS_PER_HOUR = 60
+
+
+def _check_analytics_rate(user_id):
+    now = time.monotonic()
+    times = _analytics_times.setdefault(str(user_id), [])
+    times[:] = [t for t in times if now - t < 3600]
+    if len(times) >= ANALYTICS_PER_HOUR:
+        raise HTTPException(status_code=429,
+                            detail="Too many analytics requests this hour. Please slow down.")
+    times.append(now)
+
+
+async def _social_analytics_auth(request: Request, byok_profile: Optional[str]):
+    api_key, forced_profile = await resolve_upload_post(request, None)
+    if not api_key:
+        if BILLING_ENABLED:
+            # Signed-in free user (or no auth at all): social posting is
+            # paid-only in cloud, so there are no posts to measure either.
+            raise HTTPException(status_code=402, detail={
+                "error": "no_plan",
+                "message": "Social analytics needs an active plan.",
+            })
+        raise HTTPException(status_code=400, detail="Missing X-Upload-Post-Key header")
+    if forced_profile:
+        user = await _user_from_request(request)
+        if user:
+            _check_analytics_rate(user.id)
+    return api_key, resolve_post_profile(forced_profile, byok_profile)
+
+
+async def _upload_post_get(api_key: str, url: str, params: dict):
+    headers = {"Authorization": f"Apikey {api_key}"}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=f"Vendor API Error: {resp.text}")
+    return resp.json()
+
+
+@app.get("/api/social/analytics")
+async def social_profile_analytics(
+    request: Request,
+    platforms: str = "tiktok,instagram,youtube",
+    user: Optional[str] = None,
+):
+    """Aggregated profile analytics: followers, views, engagement per platform."""
+    api_key, profile = await _social_analytics_auth(request, user)
+    return await _upload_post_get(
+        api_key,
+        f"https://api.upload-post.com/api/analytics/{profile}",
+        {"platforms": platforms},
+    )
+
+
+@app.get("/api/social/analytics/posts")
+async def social_post_analytics(
+    request: Request,
+    platform: Optional[str] = None,
+    limit: Optional[int] = None,
+    cursor: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    user: Optional[str] = None,
+):
+    """Per-post metrics for the profile's published posts (Upload-Post cache)."""
+    api_key, profile = await _social_analytics_auth(request, user)
+    params = {"user": profile}
+    for key, value in (("platform", platform), ("limit", limit),
+                       ("cursor", cursor), ("since", since), ("until", until)):
+        if value is not None:
+            params[key] = value
+    return await _upload_post_get(
+        api_key,
+        "https://api.upload-post.com/api/uploadposts/post-analytics/cached",
+        params,
+    )
+
+
+_PERIOD_DAYS = {"last_day": 1, "last_week": 7, "last_month": 30,
+                "last_3months": 90, "last_year": 365}
+
+
+def _post_row_views(row: dict) -> float:
+    metrics = row.get("post_metrics") or row.get("metrics") or row
+    for key in ("views", "impressions", "plays"):
+        value = metrics.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+@app.get("/api/social/analytics/impressions")
+async def social_total_impressions(
+    request: Request,
+    period: Optional[str] = None,     # last_day | last_week | last_month | last_3months | last_year
+    start_date: Optional[str] = None,  # YYYY-MM-DD
+    end_date: Optional[str] = None,
+    platform: Optional[str] = None,
+    breakdown: Optional[bool] = None,
+    user: Optional[str] = None,
+):
+    """Total impressions for the profile over a window.
+
+    Computed by aggregating the profile-scoped post cache instead of proxying
+    Upload-Post's /total-impressions: that endpoint echoes the requested
+    profile but returns account-wide numbers (observed 2026-08-21 — a profile
+    with zero posts got 85K Instagram impressions), which for managed users
+    would leak other tenants' aggregates. The cache endpoint IS scoped by
+    ?user=, so summing it is both correct and cheap.
+    """
+    api_key, profile = await _social_analytics_auth(request, user)
+
+    days = _PERIOD_DAYS.get(period or "", 30)
+    since = start_date or (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    params = {"user": profile, "since": since, "limit": 200}
+    if end_date:
+        params["until"] = end_date
+    if platform:
+        params["platform"] = platform
+
+    total = 0.0
+    per_platform: dict = {}
+    for _page in range(5):  # 1000 posts is far beyond any real profile window
+        data = await _upload_post_get(
+            api_key,
+            "https://api.upload-post.com/api/uploadposts/post-analytics/cached",
+            params,
+        )
+        rows = data.get("posts") or data.get("data") or data.get("items") or []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            views = _post_row_views(row)
+            total += views
+            name = row.get("platform")
+            if name:
+                per_platform[name] = per_platform.get(name, 0) + views
+        cursor = data.get("next_cursor")
+        if not cursor or not data.get("has_more"):
+            break
+        params["cursor"] = cursor
+
+    result = {
+        "profile_username": profile,
+        "total_impressions": round(total),
+        "per_platform": {k: round(v) for k, v in per_platform.items()},
+    }
+    return result
+
+
+async def _scheduled_posts_for(api_key: str, profile: str) -> list:
+    """The caller's pending scheduled posts.
+
+    Upload-Post's GET /uploadposts/schedule takes no profile filter and returns
+    everything the *account* has pending — with the managed key that is every
+    OpenShorts user's queue, so the filter below is what keeps one tenant from
+    seeing (or cancelling) another's. Same class of bug as the impressions
+    endpoint; do not "simplify" it away.
+    """
+    data = await _upload_post_get(
+        api_key, "https://api.upload-post.com/api/uploadposts/schedule", {})
+    rows = data.get("scheduled_posts") or data.get("data") or []
+    return [r for r in rows
+            if isinstance(r, dict) and r.get("profile_username") == profile]
+
+
+@app.get("/api/social/scheduled")
+async def social_scheduled(request: Request, user: Optional[str] = None):
+    """Pending scheduled posts for the caller's profile, soonest first."""
+    api_key, profile = await _social_analytics_auth(request, user)
+    rows = await _scheduled_posts_for(api_key, profile)
+    rows.sort(key=lambda r: r.get("scheduled_date") or "")
+    return {"profile_username": profile, "scheduled_posts": rows}
+
+
+@app.delete("/api/social/scheduled/{job_id}")
+async def social_cancel_scheduled(job_id: str, request: Request, user: Optional[str] = None):
+    """Cancel one pending scheduled post, if it belongs to the caller."""
+    api_key, profile = await _social_analytics_auth(request, user)
+    rows = await _scheduled_posts_for(api_key, profile)
+    if not any(r.get("job_id") == job_id for r in rows):
+        # 404 rather than 403: never confirm that someone else's job exists.
+        raise HTTPException(status_code=404, detail="Scheduled post not found")
+    headers = {"Authorization": f"Apikey {api_key}"}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.delete(
+            f"https://api.upload-post.com/api/uploadposts/schedule/{job_id}",
+            headers=headers)
+    if resp.status_code not in (200, 202, 204):
+        raise HTTPException(status_code=resp.status_code,
+                            detail=f"Vendor API Error: {resp.text}")
+    return {"success": True, "job_id": job_id}
+
+
+# --- Thumbnail Studio Endpoints ---
+
+@app.post("/api/thumbnail/upload")
+async def thumbnail_upload(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    url: Optional[str] = Form(None),
+):
+    """Upload video and start background transcription immediately."""
+    await require_managed_entitlement(request)
+    if not url and not file:
+        raise HTTPException(status_code=400, detail="Must provide URL or File")
+
+    session_id = str(uuid.uuid4())
+    transcript_event = asyncio.Event()
+
+    # Save file if uploaded directly. basename() stops a "../../x" filename from
+    # escaping UPLOAD_DIR; the chunked read caps memory so a huge body can't OOM.
+    video_path = None
+    if file:
+        safe_name = os.path.basename(file.filename or "upload") or "upload"
+        video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_name}")
+        size = 0
+        limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+        with open(video_path, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > limit_bytes:
+                    os.remove(video_path)
+                    raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
+                buffer.write(chunk)
+
+    # Meter a fixed guard cost for the background download + transcription
+    # so an entitled user can't loop it for free. Settled when the job finishes.
+    transcribe_minutes = _cloud_config.TRANSCRIBE_MINUTES if BILLING_ENABLED else 0
+    reservation_id = await reserve_managed_action(
+        request, transcribe_minutes, session_id, "thumbnail_transcribe")
+
+    # Initialize session
+    thumbnail_sessions[session_id] = {
+        "user_id": await _owner_id(request),
+        "video_path": video_path,
+        "transcript_event": transcript_event,
+        "transcript_ready": False,
+        "transcript": None,
+        "transcript_segments": [],
+        "video_duration": 0,
+        "language": "en",
+        "context": "",
+        "titles": [],
+        "conversation": [],
+        "_url": url,  # Store URL for deferred download
+    }
+
+    async def run_background_transcribe():
+        try:
+            vpath = video_path
+            # Download YouTube video if URL was provided
+            if not vpath and url:
+                from main import download_youtube_video
+                loop = asyncio.get_event_loop()
+                vpath, _ = await loop.run_in_executor(None, download_youtube_video, url, UPLOAD_DIR)
+                thumbnail_sessions[session_id]["video_path"] = vpath
+
+            from main import transcribe_video
+            loop = asyncio.get_event_loop()
+            transcript = await loop.run_in_executor(None, transcribe_video, vpath)
+            segments = transcript.get("segments", [])
+            duration = segments[-1]["end"] if segments else 0
+
+            thumbnail_sessions[session_id].update({
+                "transcript_ready": True,
+                "transcript": transcript,
+                "transcript_segments": segments,
+                "video_duration": duration,
+                "language": transcript.get("language", "en"),
+            })
+            print(f"✅ [Thumbnail] Background transcription complete for session {session_id}")
+            if reservation_id:
+                await _metering.commit_reservation(reservation_id)
+        except Exception as e:
+            print(f"❌ [Thumbnail] Background transcription failed: {e}")
+            thumbnail_sessions[session_id]["transcript_error"] = str(e)
+            if reservation_id:
+                await _metering.release_reservation(reservation_id)
+        finally:
+            transcript_event.set()
+
+    asyncio.create_task(run_background_transcribe())
+
+    return {"session_id": session_id}
+
+
+@app.post("/api/thumbnail/analyze")
+async def thumbnail_analyze(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    url: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+):
+    """Analyze a video and suggest viral YouTube titles."""
+    api_key = await resolve_gemini(request)
+    if not api_key:
+        raise gemini_missing_error()
+
+    pre_transcript = None
+
+    # Check for pre-existing session with background transcription
+    if session_id and session_id in thumbnail_sessions:
+        session = thumbnail_sessions[session_id]
+        await _assert_job_owner(request, session)
+
+        # Wait for background transcription to complete
+        transcript_event = session.get("transcript_event")
+        if transcript_event:
+            print(f"⏳ [Thumbnail] Waiting for background transcription to finish...")
+            await transcript_event.wait()
+
+        if session.get("transcript_error"):
+            raise HTTPException(status_code=500, detail=f"Transcription failed: {session['transcript_error']}")
+
+        video_path = session["video_path"]
+        if not video_path or not os.path.exists(video_path):
+            raise HTTPException(status_code=404, detail="Video file not found in session")
+
+        if session.get("transcript_ready"):
+            pre_transcript = session["transcript"]
+    else:
+        # No pre-existing session — need file or URL
+        if not url and not file:
+            raise HTTPException(status_code=400, detail="Must provide URL, File, or session_id")
+
+        session_id = str(uuid.uuid4())
+
+        if url:
+            from main import download_youtube_video
+            video_path, _ = download_youtube_video(url, UPLOAD_DIR)
+        else:
+            safe_name = os.path.basename(file.filename or "upload") or "upload"
+            video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_name}")
+            size = 0
+            limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+            with open(video_path, "wb") as buffer:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > limit_bytes:
+                        os.remove(video_path)
+                        raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
+                    buffer.write(chunk)
+
+    # Meter the managed Gemini analysis (no-op for self-host).
+    analyze_minutes = _cloud_config.MANAGED_ANALYSIS_MINUTES if BILLING_ENABLED else 0
+    reservation_id = await reserve_managed_action(request, analyze_minutes, session_id, "thumbnail_analyze")
+
+    try:
+        # Run analysis in thread pool (skips ASR if pre_transcript is available)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, analyze_video_for_titles, api_key, video_path, pre_transcript)
+
+        # Store/update session context
+        if session_id not in thumbnail_sessions:
+            thumbnail_sessions[session_id] = {"user_id": await _owner_id(request)}
+
+        thumbnail_sessions[session_id].update({
+            "context": result.get("transcript_summary", ""),
+            "titles": result.get("titles", []),
+            "language": result.get("language", "en"),
+            "conversation": thumbnail_sessions[session_id].get("conversation", []),
+            "video_path": video_path,
+            "transcript_segments": result.get("segments", []),
+            "video_duration": result.get("video_duration", 0)
+        })
+
+        if reservation_id:
+            await _metering.commit_reservation(reservation_id)
+        return {
+            "session_id": session_id,
+            "titles": result.get("titles", []),
+            "context": result.get("transcript_summary", ""),
+            "language": result.get("language", "en"),
+            "recommended": result.get("recommended", [])
+        }
+
+    except Exception as e:
+        if reservation_id:
+            await _metering.release_reservation(reservation_id)
+        print(f"❌ Thumbnail Analyze Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ThumbnailTitlesRequest(BaseModel):
+    session_id: Optional[str] = None
+    message: Optional[str] = None
+    title: Optional[str] = None
+
+@app.post("/api/thumbnail/titles")
+async def thumbnail_titles(
+    req: ThumbnailTitlesRequest,
+    request: Request,
+):
+    """Refine title suggestions or accept a manual title."""
+    api_key = await resolve_gemini(request)
+    if not api_key:
+        raise gemini_missing_error()
+
+    # Manual title mode - just create a session with the user's title
+    if req.title:
+        session_id = req.session_id or str(uuid.uuid4())
+        if session_id not in thumbnail_sessions:
+            thumbnail_sessions[session_id] = {
+                "user_id": await _owner_id(request),
+                "context": "",
+                "titles": [req.title],
+                "language": "en",
+                "conversation": []
+            }
+        else:
+            await _assert_job_owner(request, thumbnail_sessions[session_id])
+        return {"session_id": session_id, "titles": [req.title]}
+
+    # Refinement mode
+    if not req.session_id or req.session_id not in thumbnail_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not req.message:
+        raise HTTPException(status_code=400, detail="Must provide message or title")
+
+    session = thumbnail_sessions[req.session_id]
+    await _assert_job_owner(request, session)
+
+    # Add user message to conversation history
+    session["conversation"].append({"role": "user", "content": req.message})
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            refine_titles,
+            api_key,
+            session["context"],
+            req.message,
+            session["conversation"]
+        )
+
+        new_titles = result.get("titles", [])
+        session["titles"] = new_titles
+        session["conversation"].append({"role": "assistant", "content": json.dumps(new_titles)})
+
+        return {"titles": new_titles}
+
+    except Exception as e:
+        print(f"❌ Thumbnail Titles Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/thumbnail/generate")
+async def thumbnail_generate(
+    request: Request,
+    session_id: str = Form(...),
+    title: str = Form(...),
+    extra_prompt: str = Form(""),
+    count: int = Form(3),
+    face: Optional[UploadFile] = File(None),
+    background: Optional[UploadFile] = File(None),
+):
+    """Generate YouTube thumbnails with Gemini image generation."""
+    api_key = await resolve_gemini(request)
+    if not api_key:
+        raise gemini_missing_error()
+
+    # Image generation is the one expensive managed Gemini call — paid plans only.
+    if BILLING_ENABLED:
+        user = await _user_from_request(request)
+        if user is not None and user.plan == "free":
+            raise HTTPException(status_code=403, detail={
+                "error": "plan_required",
+                "message": "AI thumbnail generation is available on paid plans.",
+            })
+
+    # Clamp count
+    count = min(max(1, count), 6)
+
+    # Gemini image generation is the expensive managed call — meter it against the
+    # plan quota (a batch ≈ THUMBNAIL_MINUTES). No-op for BYOK / self-host.
+    thumb_minutes = _cloud_config.THUMBNAIL_MINUTES if BILLING_ENABLED else 0
+    reservation_id = await reserve_managed_action(request, thumb_minutes, session_id, "thumbnail")
+
+    # Save optional uploaded images. basename() on the session id and filenames
+    # keeps everything inside UPLOAD_DIR (no "../" escape from client input).
+    face_path = None
+    bg_path = None
+    safe_session = os.path.basename(session_id) or "session"
+    thumb_upload_dir = os.path.join(UPLOAD_DIR, f"thumb_{safe_session}")
+    os.makedirs(thumb_upload_dir, exist_ok=True)
+
+    try:
+        if face and face.filename:
+            face_name = os.path.basename(face.filename)
+            face_path = os.path.join(thumb_upload_dir, f"face_{face_name}")
+            with open(face_path, "wb") as f:
+                f.write(await face.read())
+
+        if background and background.filename:
+            bg_name = os.path.basename(background.filename)
+            bg_path = os.path.join(thumb_upload_dir, f"bg_{bg_name}")
+            with open(bg_path, "wb") as f:
+                f.write(await background.read())
+
+        # Get video context from session (transcript summary from analysis step)
+        video_context = ""
+        if session_id in thumbnail_sessions:
+            video_context = thumbnail_sessions[session_id].get("context", "")
+
+        # Run generation in thread pool
+        loop = asyncio.get_event_loop()
+        thumbnails = await loop.run_in_executor(
+            None,
+            generate_thumbnail,
+            api_key,
+            title,
+            session_id,
+            face_path,
+            bg_path,
+            extra_prompt,
+            count,
+            video_context
+        )
+
+        if not thumbnails:
+            raise HTTPException(status_code=500, detail="Thumbnail generation failed. Please check your Gemini API key has access to image generation (gemini-3.1-flash-image-preview model).")
+
+        # Success — charge the reserved minutes.
+        if reservation_id:
+            await _metering.commit_reservation(reservation_id)
+        return {"thumbnails": thumbnails}
+
+    except HTTPException:
+        if reservation_id:
+            await _metering.release_reservation(reservation_id)
+        raise
+    except Exception as e:
+        if reservation_id:
+            await _metering.release_reservation(reservation_id)
+        print(f"❌ Thumbnail Generate Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ThumbnailDescribeRequest(BaseModel):
+    session_id: str
+    title: str
+
+@app.post("/api/thumbnail/describe")
+async def thumbnail_describe(
+    req: ThumbnailDescribeRequest,
+    request: Request,
+):
+    """Generate a YouTube description with chapters from the transcript."""
+    api_key = await resolve_gemini(request)
+    if not api_key:
+        raise gemini_missing_error()
+
+    if req.session_id not in thumbnail_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session = thumbnail_sessions[req.session_id]
+    await _assert_job_owner(request, session)
+    segments = session.get("transcript_segments", [])
+    if not segments:
+        raise HTTPException(status_code=400, detail="No transcript segments available. Please analyze a video first.")
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            generate_youtube_description,
+            api_key,
+            req.title,
+            segments,
+            session.get("language", "en"),
+            session.get("video_duration", 0)
+        )
+        return {"description": result.get("description", "")}
+
+    except Exception as e:
+        print(f"❌ Thumbnail Describe Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/thumbnail/publish")
+async def thumbnail_publish(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session_id: str = Form(...),
+    title: str = Form(...),
+    description: str = Form(...),
+    thumbnail_url: str = Form(...),
+    api_key: Optional[str] = Form(None),   # BYOK; ignored for managed users
+    user_id: Optional[str] = Form(None),   # BYOK profile; ignored for managed users
+):
+    """Kick off a background upload to YouTube via Upload-Post and return immediately."""
+    if session_id not in thumbnail_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Managed users: server key + forced own profile; body fields ignored.
+    upload_key, forced_profile = await resolve_upload_post(request, api_key)
+    if not upload_key:
+        raise HTTPException(status_code=400, detail="Missing Upload-Post API key")
+    post_user = forced_profile or user_id
+    if not post_user:
+        raise HTTPException(status_code=400, detail="Missing Upload-Post user profile")
+
+    session = thumbnail_sessions[session_id]
+    await _assert_job_owner(request, session)
+    video_path = session.get("video_path")
+    if not video_path or not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Original video file not found")
+
+    # Resolve thumbnail path from URL — sanitize against path traversal so a
+    # crafted thumbnail_url (e.g. "thumbnails/../../.env") can't read server
+    # files and exfiltrate them via the Upload-Post multipart body.
+    thumb_relative = thumbnail_url.lstrip("/")
+    if thumb_relative.startswith("thumbnails/"):
+        thumb_path = _safe_under(OUTPUT_DIR, thumb_relative)
+    else:
+        thumb_path = _safe_under(THUMBNAILS_DIR, thumb_relative)
+
+    if not thumb_path:
+        raise HTTPException(status_code=400, detail="Invalid thumbnail path")
+    if not os.path.exists(thumb_path):
+        raise HTTPException(status_code=404, detail="Thumbnail file not found")
+
+    # Generate a unique ID for this publish job so the frontend can poll
+    publish_id = str(uuid.uuid4())
+    publish_jobs[publish_id] = {"status": "uploading", "result": None, "error": None}
+
+    def do_upload():
+        """Runs in a thread via BackgroundTasks — does the actual multipart upload."""
+        try:
+            upload_url = "https://api.upload-post.com/api/upload"
+            headers = {"Authorization": f"Apikey {upload_key}"}
+            data_payload = {
+                "user": post_user,
+                "platform[]": ["youtube"],
+                "title": title,          # required base field (fallback)
+                "async_upload": "true",
+                "youtube_title": title,
+                "youtube_description": description,
+                "privacyStatus": "public",
+            }
+            video_filename = os.path.basename(video_path)
+            thumb_filename = os.path.basename(thumb_path)
+
+            print(f"📡 [Thumbnail] Publishing to YouTube via Upload-Post... (publish_id={publish_id})")
+            with open(video_path, "rb") as vf, open(thumb_path, "rb") as tf:
+                files = {
+                    "video": (video_filename, vf.read(), "video/mp4"),
+                    "thumbnail": (thumb_filename, tf.read(), "image/jpeg"),
+                }
+
+            # Use a long timeout — video uploads can take several minutes
+            with httpx.Client(timeout=600.0) as client:
+                response = client.post(upload_url, headers=headers, data=data_payload, files=files)
+
+            if response.status_code not in [200, 201, 202]:
+                err = f"Upload-Post API Error ({response.status_code}): {response.text}"
+                print(f"❌ {err}")
+                publish_jobs[publish_id]["status"] = "failed"
+                publish_jobs[publish_id]["error"] = err
+            else:
+                print(f"✅ [Thumbnail] Published successfully (publish_id={publish_id})")
+                publish_jobs[publish_id]["status"] = "done"
+                publish_jobs[publish_id]["result"] = response.json()
+
+        except Exception as e:
+            err = str(e)
+            print(f"❌ Thumbnail Publish Background Error: {err}")
+            publish_jobs[publish_id]["status"] = "failed"
+            publish_jobs[publish_id]["error"] = err
+
+    background_tasks.add_task(do_upload)
+    return {"publish_id": publish_id, "status": "uploading"}
+
+
+@app.get("/api/thumbnail/publish/status/{publish_id}")
+async def thumbnail_publish_status(publish_id: str):
+    """Poll the status of a background publish job."""
+    if publish_id not in publish_jobs:
+        raise HTTPException(status_code=404, detail="Publish job not found")
+    return publish_jobs[publish_id]
+
+
+# @app.get("/api/gallery/clips")
+# async def get_gallery_clips(limit: int = 20, offset: int = 0, refresh: bool = False):
+#     """
+#     Fetch clips from S3 for the gallery with pagination.
+#
+#     Args:
+#         limit: Number of clips to return (default 20, max 100)
+#         offset: Starting position for pagination
+#         refresh: Force refresh cache
+#     """
+#     try:
+#         # Clamp limit to reasonable values
+#         limit = min(max(1, limit), 100)
+#
+#         # Get clips (uses cache internally)
+#         all_clips = list_all_clips(limit=limit + offset, force_refresh=refresh)
+#
+#         # Apply offset for pagination
+#         clips = all_clips[offset:offset + limit]
+#
+#         return {
+#             "clips": clips,
+#             "total": len(all_clips),
+#             "limit": limit,
+#             "offset": offset,
+#             "has_more": len(all_clips) > offset + limit
+#         }
+#     except Exception as e:
+#         print(f"❌ Gallery Error: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SaaSShorts: AI UGC Video Generator for SaaS Products
+# ═══════════════════════════════════════════════════════════════════════
+
+from saasshorts import (
+    scrape_website,
+    research_saas_online,
+    analyze_saas,
+    generate_scripts,
+    generate_full_video,
+    generate_actor_images,
+    get_elevenlabs_voices,
+    DEFAULT_VOICES,
+)
+
+# State for SaaSShorts jobs (separate from video processing jobs)
+saas_jobs: Dict[str, Dict] = {}
+
+
+class SaaSAnalyzeRequest(BaseModel):
+    url: Optional[str] = None
+    description: Optional[str] = None  # Manual product/business description
+    num_scripts: int = 3
+    style: str = "ugc"
+    language: str = "en"
+    actor_gender: str = "female"
+
+
+@app.post("/api/saasshorts/analyze")
+async def saasshorts_analyze(
+    req: SaaSAnalyzeRequest,
+    request: Request,
+):
+    """Analyze a URL or manual description and generate video scripts."""
+    gemini_key = await resolve_gemini(request)
+    if not gemini_key:
+        raise gemini_missing_error()
+
+    if not req.url and not req.description:
+        raise HTTPException(status_code=400, detail="Provide a URL or a product description")
+
+    # Meter the managed Gemini research/analysis (no-op for self-host).
+    saas_minutes = _cloud_config.MANAGED_ANALYSIS_MINUTES if BILLING_ENABLED else 0
+    reservation_id = await reserve_managed_action(request, saas_minutes, "saasshorts", "saasshorts_analyze")
+
+    try:
+        loop = asyncio.get_event_loop()
+
+        def run_analysis():
+            web_research = None
+
+            if req.url and req.url.strip():
+                # URL provided: full scrape + research pipeline
+                scraped = scrape_website(req.url)
+                web_research = research_saas_online(req.url, gemini_key)
+                analysis = analyze_saas(scraped, gemini_key, web_research=web_research)
+            else:
+                # Manual description: build analysis from description
+                analysis = {
+                    "product_name": req.description.split(",")[0].strip()[:60] if req.description else "Product",
+                    "description": req.description,
+                    "value_proposition": req.description,
+                    "target_audience": "general audience",
+                    "key_features": [req.description],
+                    "pain_points": [],
+                    "tone": "casual and authentic",
+                }
+
+            scripts = generate_scripts(analysis, gemini_key, req.num_scripts, req.style, req.language, req.actor_gender)
+            return {
+                "analysis": analysis,
+                "scripts": scripts,
+                "web_research": web_research,
+            }
+
+        result = await loop.run_in_executor(None, run_analysis)
+        if reservation_id:
+            await _metering.commit_reservation(reservation_id)
+        return result
+
+    except Exception as e:
+        if reservation_id:
+            await _metering.release_reservation(reservation_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SaaSActorRequest(BaseModel):
+    actor_description: str
+    num_options: int = 3
+    product_description: Optional[str] = None
+
+
+@app.post("/api/saasshorts/actor-upload")
+async def saasshorts_actor_upload(request: Request, file: UploadFile = File(...)):
+    """Upload a custom actor image (stored locally only, not S3)."""
+    # SaaSShorts is part of the paid product — require entitlement in cloud mode
+    # (no-op for self-host) so anonymous callers can't drive server work.
+    await require_managed_entitlement(request)
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    try:
+        # Bounded read: an actor image has no business being large. Cap it so an
+        # anonymous caller can't stream a multi-GB body into RAM (OOM DoS).
+        ACTOR_IMAGE_MAX_BYTES = 25 * 1024 * 1024  # 25 MB
+        content = await file.read(ACTOR_IMAGE_MAX_BYTES + 1)
+        if len(content) > ACTOR_IMAGE_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Image too large (max 25 MB)")
+
+        # Validate minimum size
+        if len(content) < 1000:
+            raise HTTPException(status_code=400, detail="File too small to be a valid image")
+
+        upload_id = uuid.uuid4().hex[:8]
+        upload_dir = os.path.join(OUTPUT_DIR, "actor_uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+        filename = f"custom_{upload_id}.png"
+        file_path = os.path.join(upload_dir, filename)
+
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        return {"url": f"/videos/actor_uploads/{filename}"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/saasshorts/actor-options")
+async def saasshorts_actor_options(
+    req: SaaSActorRequest,
+    request: Request,
+    x_fal_key: Optional[str] = Header(None, alias="X-Fal-Key"),
+):
+    """Generate multiple actor image options for the user to choose from."""
+    await require_managed_entitlement(request)
+    fal_key = x_fal_key
+    if not fal_key:
+        raise HTTPException(status_code=400, detail="Missing fal.ai API Key")
+
+    try:
+        job_id = str(uuid.uuid4())
+        out_dir = os.path.join(OUTPUT_DIR, f"saas_actors_{job_id}")
+        os.makedirs(out_dir, exist_ok=True)
+
+        loop = asyncio.get_running_loop()
+        import functools
+        paths = await loop.run_in_executor(
+            None,
+            functools.partial(
+                generate_actor_images,
+                req.actor_description, fal_key, out_dir, "actor", req.num_options,
+                product_description=req.product_description,
+            ),
+        )
+
+        # Upload each actor image to public S3 with description
+        desc = req.actor_description
+        if req.product_description:
+            desc += f" (holding {req.product_description})"
+        urls = []
+        for p in paths:
+            s3_url = upload_actor_to_s3(p, description=desc)
+            if s3_url:
+                urls.append(s3_url)
+            else:
+                # Fallback to local URL if S3 fails
+                urls.append(f"/videos/saas_actors_{job_id}/{os.path.basename(p)}")
+
+        return {"images": urls}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/saasshorts/gallery")
+async def saasshorts_video_gallery(limit: int = 50):
+    """List all UGC videos from the public gallery."""
+    try:
+        loop = asyncio.get_running_loop()
+        videos = await loop.run_in_executor(None, list_video_gallery, limit)
+        return {"videos": videos, "total": len(videos)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SaaSPostRequest(BaseModel):
+    job_id: str
+    api_key: Optional[str] = None  # BYOK; ignored for managed users
+    user_id: Optional[str] = None  # BYOK profile; ignored for managed users
+    platforms: List[str]
+    title: Optional[str] = None
+    description: Optional[str] = None
+    scheduled_date: Optional[str] = None
+    timezone: Optional[str] = "UTC"
+
+
+@app.post("/api/saasshorts/post")
+async def saasshorts_post_to_socials(req: SaaSPostRequest, request: Request):
+    """Post an AI Shorts video to social media via Upload-Post."""
+    if req.job_id not in saas_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    upload_key, forced_profile = await resolve_upload_post(request, req.api_key)
+    if not upload_key:
+        raise HTTPException(status_code=400, detail="Missing Upload-Post API key")
+    post_user = resolve_post_profile(forced_profile, req.user_id)
+
+    job = saas_jobs[req.job_id]
+    await _assert_job_owner(request, job)
+    result = job.get("result")
+    if not result or not result.get("video_url"):
+        raise HTTPException(status_code=400, detail="No video available for this job")
+
+    try:
+        # Resolve video file path
+        video_url = result["video_url"]  # e.g. /videos/saas_xxx/slug_final.mp4
+        rel_path = video_url.replace("/videos/", "")
+        file_path = os.path.join(OUTPUT_DIR, rel_path)
+
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"Video file not found")
+
+        script = result.get("script", {})
+        final_title = req.title or script.get("title", "AI Short")
+        final_description = req.description or script.get("caption", "")
+        if not final_description:
+            final_description = script.get("full_narration", "Check this out!")
+
+        url = "https://api.upload-post.com/api/upload"
+        headers = {"Authorization": f"Apikey {upload_key}"}
+
+        data_payload = {
+            "user": post_user,
+            "title": final_title,
+            "platform[]": req.platforms,
+            "async_upload": "true",
+        }
+
+        if req.scheduled_date:
+            data_payload["scheduled_date"] = req.scheduled_date
+            if req.timezone:
+                data_payload["timezone"] = req.timezone
+
+        if "tiktok" in req.platforms:
+            data_payload["tiktok_title"] = final_description
+            data_payload["post_mode"] = TIKTOK_POST_MODE
+        if "instagram" in req.platforms:
+            data_payload["instagram_title"] = final_description
+            data_payload["media_type"] = "REELS"
+        if "youtube" in req.platforms:
+            data_payload["youtube_title"] = final_title
+            data_payload["youtube_description"] = final_description
+            data_payload["privacyStatus"] = "public"
+
+        filename = os.path.basename(file_path)
+        with open(file_path, "rb") as f:
+            file_content = f.read()
+
+        files = {"video": (filename, file_content, "video/mp4")}
+
+        with httpx.Client(timeout=120.0) as client:
+            print(f"📡 [AI Shorts] Sending to Upload-Post: {req.platforms}")
+            response = client.post(url, headers=headers, data=data_payload, files=files)
+
+        if response.status_code not in [200, 201, 202]:
+            raise HTTPException(status_code=response.status_code, detail=f"Upload-Post Error: {response.text}")
+
+        return response.json()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ [AI Shorts] Post Exception: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/gallery", response_class=HTMLResponse)
+async def gallery_html_page():
+    """SEO gallery page with all generated UGC videos."""
+    import html as html_mod
+    loop = asyncio.get_running_loop()
+    videos = await loop.run_in_executor(None, list_video_gallery, 100)
+
+    cards_html = ""
+    ld_items = []
+    for i, v in enumerate(videos):
+        title = html_mod.escape(v.get("title", "Untitled"))
+        video_url = v.get("video_url", "")
+        actor_url = v.get("actor_url", "")
+        video_id = v.get("video_id", "")
+        duration = v.get("duration", 0)
+        mode = v.get("video_mode", "")
+        product = html_mod.escape(v.get("product_name", ""))
+        caption = html_mod.escape(v.get("caption", "")[:120])
+
+        mode_badge = '<span style="background:#22c55e;color:#000;padding:2px 8px;border-radius:9999px;font-size:10px;font-weight:700">LOW COST</span>' if mode == "lowcost" else '<span style="background:#8b5cf6;color:#fff;padding:2px 8px;border-radius:9999px;font-size:10px;font-weight:700">PREMIUM</span>'
+
+        cards_html += f'''
+        <a href="/video/{video_id}" style="text-decoration:none;color:inherit">
+          <div style="background:#18181b;border-radius:16px;overflow:hidden;border:1px solid #27272a;transition:transform 0.2s" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
+            <div style="position:relative;aspect-ratio:9/16;background:#000">
+              <video src="{video_url}" poster="{actor_url}" muted playsinline preload="metadata"
+                     onmouseenter="this.play()" onmouseleave="this.pause();this.currentTime=0"
+                     style="width:100%;height:100%;object-fit:cover"></video>
+              <div style="position:absolute;top:8px;right:8px">{mode_badge}</div>
+            </div>
+            <div style="padding:12px">
+              <h2 style="font-size:14px;font-weight:600;margin:0 0 4px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{title}</h2>
+              <p style="font-size:11px;color:#71717a;margin:0">{duration:.0f}s · {product}</p>
+            </div>
+          </div>
+        </a>'''
+
+        ld_items.append(f'{{"@type":"ListItem","position":{i+1},"url":"https://openshorts.app/video/{video_id}","name":"{title}"}}')
+
+    ld_json = f'{{"@context":"https://schema.org","@type":"CollectionPage","name":"AI UGC Video Gallery","mainEntity":{{"@type":"ItemList","numberOfItems":{len(videos)},"itemListElement":[{",".join(ld_items)}]}}}}'
+
+    return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI UGC Video Gallery | OpenShorts</title>
+<meta name="description" content="Browse {len(videos)} AI-generated UGC marketing videos. Create viral TikTok and Instagram Reels for your SaaS product.">
+<meta name="robots" content="index, follow">
+<meta property="og:title" content="AI UGC Video Gallery | OpenShorts">
+<meta property="og:type" content="website">
+<meta property="og:description" content="Browse AI-generated UGC marketing videos for SaaS products.">
+<script type="application/ld+json">{ld_json}</script>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#0a0a0c;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,sans-serif}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:20px;padding:20px;max-width:1400px;margin:0 auto}}
+nav{{padding:20px 40px;border-bottom:1px solid #27272a;display:flex;align-items:center;justify-content:space-between}}
+h1{{font-size:28px;font-weight:700;padding:40px 20px 0;text-align:center}}
+.subtitle{{text-align:center;color:#71717a;font-size:14px;padding:8px 20px 20px}}
+.cta{{display:inline-block;background:#8b5cf6;color:#fff;padding:10px 24px;border-radius:12px;text-decoration:none;font-weight:600;font-size:14px}}
+</style>
+</head>
+<body>
+<nav><strong style="font-size:18px">OpenShorts</strong><a href="/" class="cta">Create Your Video</a></nav>
+<h1>AI-Generated UGC Videos</h1>
+<p class="subtitle">{len(videos)} videos generated · Low Cost & Premium modes</p>
+<div class="grid">{cards_html}</div>
+<div style="text-align:center;padding:40px"><a href="/" class="cta">Create Your Own UGC Video</a></div>
+</body></html>'''
+
+
+@app.get("/video/{video_id}", response_class=HTMLResponse)
+async def video_html_page(video_id: str):
+    """SEO individual video page with og:video meta tags."""
+    import html as html_mod
+    loop = asyncio.get_running_loop()
+    videos = await loop.run_in_executor(None, list_video_gallery, 200)
+    meta = next((v for v in videos if v.get("video_id") == video_id), None)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    title = html_mod.escape(meta.get("title", "Untitled"))
+    caption = html_mod.escape(meta.get("caption", ""))
+    narration = html_mod.escape(meta.get("full_narration", ""))
+    video_url = meta.get("video_url", "")
+    actor_url = meta.get("actor_url", "")
+    duration = meta.get("duration", 0)
+    mode = meta.get("video_mode", "")
+    product = html_mod.escape(meta.get("product_name", ""))
+    product_url = html_mod.escape(meta.get("product_url", ""))
+    language = meta.get("language", "en")
+    hashtags = " ".join(meta.get("hashtags", []))
+    cost = meta.get("cost_estimate", {}).get("total", 0)
+    created = meta.get("created_at", "")
+    actor_desc = html_mod.escape(meta.get("actor_description", ""))
+
+    ld_json = f'{{"@context":"https://schema.org","@type":"VideoObject","name":"{title}","description":"{caption}","thumbnailUrl":"{actor_url}","contentUrl":"{video_url}","uploadDate":"{created}","duration":"PT{int(duration)}S","width":1080,"height":1920,"inLanguage":"{language}"}}'
+
+    mode_label = "Low Cost" if mode == "lowcost" else "Premium"
+
+    return f'''<!DOCTYPE html>
+<html lang="{language}">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title} - AI UGC Video | OpenShorts</title>
+<meta name="description" content="{caption} {hashtags}">
+<meta property="og:type" content="video.other">
+<meta property="og:title" content="{title}">
+<meta property="og:description" content="{caption}">
+<meta property="og:video" content="{video_url}">
+<meta property="og:video:type" content="video/mp4">
+<meta property="og:video:width" content="1080">
+<meta property="og:video:height" content="1920">
+<meta property="og:image" content="{actor_url}">
+<meta name="twitter:card" content="player">
+<meta name="twitter:title" content="{title}">
+<meta name="twitter:image" content="{actor_url}">
+<script type="application/ld+json">{ld_json}</script>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#0a0a0c;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,sans-serif}}
+nav{{padding:20px 40px;border-bottom:1px solid #27272a;display:flex;align-items:center;gap:16px}}
+nav a{{color:#a1a1aa;text-decoration:none;font-size:14px}}
+.container{{max-width:1000px;margin:0 auto;padding:40px 20px;display:grid;grid-template-columns:1fr 1fr;gap:40px}}
+@media(max-width:768px){{.container{{grid-template-columns:1fr}}}}
+video{{width:100%;border-radius:16px;background:#000}}
+h1{{font-size:22px;font-weight:700;margin-bottom:8px}}
+.meta{{color:#71717a;font-size:13px;margin-bottom:20px}}
+.section{{margin-bottom:20px}}
+.section h2{{font-size:13px;color:#71717a;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}}
+.section p{{font-size:14px;line-height:1.6}}
+.badge{{display:inline-block;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:700}}
+.cta{{display:inline-block;background:#8b5cf6;color:#fff;padding:10px 24px;border-radius:12px;text-decoration:none;font-weight:600;font-size:14px;margin-top:20px}}
+</style>
+</head>
+<body>
+<nav><strong>OpenShorts</strong><a href="/gallery">Gallery</a><span style="color:#3f3f46">›</span><span style="color:#e4e4e7;font-size:14px">{title}</span></nav>
+<div class="container">
+<div><video src="{video_url}" poster="{actor_url}" controls autoplay playsinline style="aspect-ratio:9/16;object-fit:cover"></video></div>
+<div>
+<h1>{title}</h1>
+<p class="meta">{duration:.0f}s · {mode_label} · ${cost:.2f} · {product}</p>
+<div class="section"><h2>Caption</h2><p>{caption}</p><p style="color:#8b5cf6;margin-top:4px">{hashtags}</p></div>
+<div class="section"><h2>Script</h2><p>{narration}</p></div>
+<div class="section"><h2>Actor</h2><p>{actor_desc}</p></div>
+{f'<div class="section"><h2>Product</h2><p><a href="{product_url}" style="color:#8b5cf6" target="_blank">{product}</a></p></div>' if product_url else ''}
+<a href="/gallery">← Back to Gallery</a>
+<br><a href="/" class="cta">Create Your Own</a>
+</div>
+</div>
+</body></html>'''
+
+
+@app.get("/api/saasshorts/actor-gallery")
+async def saasshorts_actor_gallery():
+    """List all previously generated actor images from public S3."""
+    try:
+        loop = asyncio.get_running_loop()
+        images = await loop.run_in_executor(None, list_actor_gallery)
+        return {"images": images}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SaaSGenerateRequest(BaseModel):
+    script: dict
+    voice_id: Optional[str] = None
+    actor_description: Optional[str] = None
+    selected_actor_url: Optional[str] = None  # Pre-selected actor image URL
+    retry_job_id: Optional[str] = None
+    video_mode: str = "lowcost"  # "lowcost" or "premium"
+    # Publishing to the public /gallery is opt-in: generated videos carry the
+    # user's product name, URL and full script.
+    share_to_gallery: bool = False
+
+
+@app.post("/api/saasshorts/generate")
+async def saasshorts_generate(
+    req: SaaSGenerateRequest,
+    request: Request,
+    x_fal_key: Optional[str] = Header(None, alias="X-Fal-Key"),
+    x_elevenlabs_key: Optional[str] = Header(None, alias="X-ElevenLabs-Key"),
+):
+    """Generate a SaaS UGC video from a script. Returns a job_id for polling."""
+    await require_managed_entitlement(request)
+    fal_key = x_fal_key
+    elevenlabs_key = x_elevenlabs_key
+
+    if not fal_key:
+        raise HTTPException(status_code=400, detail="Missing fal.ai API Key (X-Fal-Key header)")
+    if not elevenlabs_key:
+        raise HTTPException(status_code=400, detail="Missing ElevenLabs API Key (X-ElevenLabs-Key header)")
+
+    # Support retry: reuse output_dir so cached assets (image, voice, head, broll) are kept
+    reused = False
+    if req.retry_job_id:
+        # Check memory first, then disk. _safe_under() blocks a crafted
+        # retry_job_id like "../../tmp/x" from escaping OUTPUT_DIR (the listdir
+        # below deletes files and the pipeline writes here). A known in-memory
+        # job keeps its trusted stored path.
+        if req.retry_job_id in saas_jobs:
+            await _assert_job_owner(request, saas_jobs[req.retry_job_id])
+            old_dir = saas_jobs[req.retry_job_id]["output_dir"]
+        else:
+            old_dir = _safe_under(OUTPUT_DIR, f"saas_{req.retry_job_id}")
+
+        if old_dir and os.path.isdir(old_dir):
+            job_id = req.retry_job_id
+            job_output_dir = old_dir
+            reused = True
+            # Clear the 0-byte final video so pipeline re-generates it
+            for f in os.listdir(old_dir):
+                fp = os.path.join(old_dir, f)
+                if f.endswith("_final.mp4") and os.path.getsize(fp) == 0:
+                    os.remove(fp)
+            saas_jobs[job_id] = {
+                "user_id": await _owner_id(request),
+                "status": "processing",
+                "logs": [f"Retrying job {job_id[:8]}... reusing cached assets from disk."],
+                "result": None,
+                "output_dir": job_output_dir,
+            }
+
+    if not reused:
+        job_id = str(uuid.uuid4())
+        job_output_dir = os.path.join(OUTPUT_DIR, f"saas_{job_id}")
+        os.makedirs(job_output_dir, exist_ok=True)
+        saas_jobs[job_id] = {
+            "user_id": await _owner_id(request),
+            "status": "processing",
+            "logs": ["SaaSShorts job started."],
+            "result": None,
+            "output_dir": job_output_dir,
+        }
+
+    # If user selected a pre-generated actor, resolve it to a local path
+    selected_actor_path = None
+    if req.selected_actor_url:
+        if req.selected_actor_url.startswith("http"):
+            # Download from S3 public URL to job output dir
+            import httpx
+            from security_utils import assert_public_url
+            try:
+                # SSRF guard: block private / metadata hosts before fetching.
+                safe_actor_url = assert_public_url(req.selected_actor_url)
+                actor_local = os.path.join(job_output_dir, "selected_actor.png")
+                with httpx.Client(timeout=30.0) as client:
+                    resp = client.get(safe_actor_url)
+                    if resp.status_code == 200:
+                        with open(actor_local, "wb") as f:
+                            f.write(resp.content)
+                        selected_actor_path = actor_local
+            except Exception:
+                pass
+        else:
+            # Sanitize against traversal — the client controls selected_actor_url.
+            src = _safe_under(OUTPUT_DIR, req.selected_actor_url.replace("/videos/", "").lstrip("/"))
+            if src and os.path.exists(src):
+                selected_actor_path = src
+
+    config = {
+        "fal_key": fal_key,
+        "elevenlabs_key": elevenlabs_key,
+        "voice_id": req.voice_id or "21m00Tcm4TlvDq8ikWAM",
+        "actor_description": req.actor_description,
+        "selected_actor_path": selected_actor_path,
+        "video_mode": req.video_mode,
+    }
+
+    async def run_generation():
+        await concurrency_semaphore.acquire()
+        try:
+            loop = asyncio.get_running_loop()
+
+            def log_msg(msg):
+                print(f"[SaaSShorts Job {job_id[:8]}] {msg}")
+                if job_id in saas_jobs:
+                    saas_jobs[job_id]["logs"].append(msg)
+
+            def run():
+                return generate_full_video(req.script, config, job_output_dir, log_msg)
+
+            result = await loop.run_in_executor(None, run)
+
+            if job_id in saas_jobs:
+                video_filename = result["video_filename"]
+                saas_jobs[job_id]["status"] = "completed"
+                saas_jobs[job_id]["result"] = {
+                    "video_url": f"/videos/saas_{job_id}/{video_filename}",
+                    "video_filename": video_filename,
+                    "duration": result.get("duration", 0),
+                    "cost_estimate": result.get("cost_estimate", {}),
+                    "script": req.script,
+                }
+                saas_jobs[job_id]["logs"].append("Video generation completed!")
+
+                # Upload to public gallery — opt-in only: the metadata carries
+                # the user's product name, URL and full script.
+                if req.share_to_gallery:
+                    try:
+                        gallery_meta = {
+                            "title": req.script.get("title", "Untitled"),
+                            "hook_text": req.script.get("hook_text", ""),
+                            "caption": req.script.get("caption", ""),
+                            "hashtags": req.script.get("hashtags", []),
+                            "full_narration": req.script.get("full_narration", ""),
+                            "actor_description": req.script.get("actor_description", ""),
+                            "style": req.script.get("style", "ugc"),
+                            "language": req.script.get("language", "en"),
+                            "duration": result.get("duration", 0),
+                            "video_mode": req.video_mode,
+                            "product_name": req.script.get("_product_name", ""),
+                            "product_url": req.script.get("_product_url", ""),
+                            "segments": req.script.get("segments", []),
+                            "cost_estimate": result.get("cost_estimate", {}),
+                        }
+                        gallery_result = upload_video_to_gallery(
+                            video_path=result["video_path"],
+                            actor_image_path=result.get("actor_image", ""),
+                            metadata=gallery_meta,
+                            video_id=job_id[:8],
+                        )
+                        if gallery_result:
+                            saas_jobs[job_id]["result"]["gallery_video_id"] = gallery_result["video_id"]
+                            log_msg("📤 Uploaded to public gallery.")
+                    except Exception as gallery_err:
+                        log_msg(f"⚠️ Gallery upload skipped: {gallery_err}")
+
+        except Exception as e:
+            print(f"[SaaSShorts] ❌ Job {job_id} failed: {e}")
+            if job_id in saas_jobs:
+                saas_jobs[job_id]["status"] = "failed"
+                saas_jobs[job_id]["logs"].append(f"Error: {str(e)}")
+        finally:
+            concurrency_semaphore.release()
+
+    asyncio.create_task(run_generation())
+
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/saasshorts/status/{job_id}")
+async def saasshorts_status(job_id: str, request: Request):
+    """Poll SaaSShorts job status."""
+    if job_id not in saas_jobs:
+        raise HTTPException(status_code=404, detail="SaaSShorts job not found")
+
+    job = saas_jobs[job_id]
+    await _assert_job_owner(request, job)
+    return {
+        "status": job["status"],
+        "logs": job["logs"],
+        "result": job.get("result"),
+    }
+
+
+@app.get("/api/saasshorts/voices")
+async def saasshorts_voices(
+    x_elevenlabs_key: Optional[str] = Header(None, alias="X-ElevenLabs-Key"),
+):
+    """List available ElevenLabs voices."""
+    if x_elevenlabs_key:
+        try:
+            loop = asyncio.get_event_loop()
+            voices = await loop.run_in_executor(
+                None, get_elevenlabs_voices, x_elevenlabs_key
+            )
+            if voices:
+                return {"voices": voices, "source": "elevenlabs"}
+        except Exception:
+            pass
+
+    # Fallback to default voices
+    return {
+        "voices": [
+            {"voice_id": vid, "name": name, "category": "default"}
+            for name, vid in DEFAULT_VOICES.items()
+        ],
+        "source": "defaults",
+    }

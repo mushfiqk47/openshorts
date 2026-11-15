@@ -17,24 +17,11 @@ Environment variables:
                         only — the legacy path stays untouched)
   TRANSNETV2_THRESHOLD  shot-boundary probability threshold (default 0.5)
   TRANSNETV2_DEVICE     torch device: "auto" (default) | "cpu" | "cuda" | "mps"
-                        "auto" uses CUDA when torch actually has it, else CPU; an
-                        explicit "cuda" on a CPU-only torch falls back to CPU
-                        with an info log (no scary warning)
 """
 
 import os
 import subprocess
-import sys
 import threading
-
-# Windows cp1252 can't encode emojis; force utf-8 for prints
-for _s in ("stdout", "stderr"):
-    _st = getattr(sys, _s, None)
-    if _st and hasattr(_st, "reconfigure"):
-        try:
-            _st.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
 
 import cv2
 import numpy as np
@@ -50,46 +37,6 @@ _TN2_LOCK = threading.Lock()
 _tn2_model = None
 
 
-def _cuda_available():
-    """True when torch can actually use CUDA. CPU-only torch builds lack
-    CUDA support entirely - either way this is False, never an exception."""
-    try:
-        import torch
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
-
-
-def _mps_available():
-    try:
-        import torch
-        mps = getattr(getattr(torch, "backends", None), "mps", None)
-        return bool(mps and mps.is_available())
-    except Exception:
-        return False
-
-
-def _resolve_tn2_device(requested):
-    """Map TRANSNETV2_DEVICE to an explicit device the lib can construct.
-
-    Never returns "auto": TransNetV2 auto handling assumes a CUDA-built
-    torch and raises on CPU-only installs. Resolving here keeps CPU hosts
-    on a quiet CPU path instead of a fallback warning.
-    """
-    req = (requested or "auto").strip().lower()
-    if req in ("", "auto"):
-        if _cuda_available():
-            return "cuda"
-        if _mps_available():
-            return "mps"
-        return "cpu"
-    if req in ("cuda", "0", "gpu"):
-        return "cuda" if _cuda_available() else "cpu"
-    if req == "mps":
-        return "mps" if _mps_available() else "cpu"
-    return "cpu"
-
-
 def detect_scenes(video_path):
     """Detect scenes. Returns (scene_list, fps) where scene_list is a list of
     (FrameTimecode, FrameTimecode) pairs — the same contract PySceneDetect's
@@ -99,13 +46,8 @@ def detect_scenes(video_path):
         try:
             return _detect_transnetv2(video_path)
         except Exception as e:
-            msg = str(e).lower()
-            if "cuda" in msg or "cublas" in msg or "nvrtc" in msg or "mps" in msg:
-                print(f"   [TransNetV2] GPU unavailable "
-                      f"({type(e).__name__}: {e}) — using PySceneDetect on CPU")
-            else:
-                print(f"   ⚠️ TransNetV2 scene detection failed "
-                      f"({type(e).__name__}: {e}) — falling back to PySceneDetect")
+            print(f"   ⚠️ TransNetV2 scene detection failed "
+                  f"({type(e).__name__}: {e}) — falling back to PySceneDetect")
     return _detect_pyscenedetect(video_path)
 
 
@@ -127,12 +69,7 @@ def _get_tn2_model():
     global _tn2_model
     if _tn2_model is None:
         from transnetv2_pytorch import TransNetV2
-        requested = os.environ.get("TRANSNETV2_DEVICE", "auto")
-        device = _resolve_tn2_device(requested)
-        if (requested or "auto").strip().lower() in ("cuda", "0", "gpu") and device == "cpu":
-            print("   [TransNetV2] TRANSNETV2_DEVICE=cuda requested but CUDA "
-                  "is not available (CPU-only torch?) — using CPU, which is "
-                  "realtime for 48x27 frames")
+        device = os.environ.get("TRANSNETV2_DEVICE", "auto")
         model = TransNetV2(device=device)
         model.eval()
         _tn2_model = model
@@ -153,7 +90,7 @@ def _extract_frames_small(video_path):
     if n == 0:
         raise RuntimeError("ffmpeg produced no frames")
     return np.frombuffer(proc.stdout[:n * frame_bytes],
-                         dtype=np.uint8).copy().reshape(n, _TN2_H, _TN2_W, 3)
+                         dtype=np.uint8).reshape(n, _TN2_H, _TN2_W, 3)
 
 
 def _detect_transnetv2(video_path):

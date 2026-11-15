@@ -24,7 +24,7 @@ import Modal from './ui/Modal';
 // Deliberately NOT sold here: GPU rendering and the included Gemini key. Both
 // are real and both are why the cloud beats self-hosting, but the free plan
 // already gets them (the pricing page says "Same GPU rendering" on the free
-// tier) — so they belong on the landing/pricing surface facing repo visitors,
+// tier) — so they belong on the pricing surface facing repo visitors,
 // not in a modal shown to someone who is already using them.
 const PLAN_BLURBS = {
   starter: 'for getting started',
@@ -55,7 +55,8 @@ export default function TopUpModal({ onClose, required, remaining, context = 'wa
         setTopups(d.topups || []);
       })
       .catch(() => {});
-  }, [isUpsell, required, remaining]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only fetch
+  }, []);
 
   // Instrumented in three steps on purpose. Between 25-jul and 1-ago the modals
   // logged 35 checkout clicks and Stripe recorded ONE new subscription, and
@@ -128,10 +129,10 @@ export default function TopUpModal({ onClose, required, remaining, context = 'wa
                   Most popular
                 </span>
               )}
-              <h3 className="font-display lowercase text-lg text-ink">{entry.plan}</h3>
+              <h3 className="font-display font-medium lowercase text-lg text-ink">{entry.plan}</h3>
               <p className="text-muted text-xs mb-3 lowercase">{PLAN_BLURBS[entry.plan] || ''}</p>
               <div className="mb-3 flex items-baseline gap-1.5">
-                <span className="font-display text-3xl text-ink tabular-nums">{fmt(entry.amount, entry.currency)}</span>
+                <span className="font-display font-semibold text-3xl text-ink tabular-nums">{fmt(entry.amount, entry.currency)}</span>
                 <span className="readout">/mo</span>
               </div>
               <ul className="space-y-1.5 text-sm text-ink2 mb-4 flex-1">

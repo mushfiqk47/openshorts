@@ -6,7 +6,6 @@ import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 
 const FONT_OPTIONS = [
-    { value: 'Liberation Sans', label: 'Liberation Sans' },
     { value: 'Verdana', label: 'Verdana' },
     { value: 'Arial', label: 'Arial' },
     { value: 'Impact', label: 'Impact' },
@@ -25,7 +24,6 @@ const COLOR_PRESETS = [
 ];
 
 const HIGHLIGHT_PRESETS = [
-    { color: '#3B5BFF', label: 'Visla Blue' },
     { color: '#FFDD00', label: 'Gold' },
     { color: '#FF4444', label: 'Red' },
     { color: '#00FF88', label: 'Green' },
@@ -37,7 +35,6 @@ const ANIMATION_OPTIONS = [
     { value: 'pop', label: 'Pop' },
     { value: 'word-highlight', label: 'Glow' },
     { value: 'karaoke', label: 'Karaoke' },
-    { value: 'box', label: 'Box' },
     { value: 'none', label: 'None' },
 ];
 
@@ -47,22 +44,9 @@ const POSITION_OPTIONS = [
     { value: 'bottom', label: 'bottom' },
 ];
 
-const SIZE_OPTIONS = [
-    { value: 'S', label: 'Small' },
-    { value: 'M', label: 'Medium' },
-    { value: 'L', label: 'Large' },
-];
-
-const SIZE_TO_FONTSIZE = {
-    'S': 10,
-    'M': 13,
-    'L': 17,
-};
-
 // Ready-made caption looks burned server-side as karaoke ASS (word highlight):
 // dimmed base text + strong active word, optional glow/pop/box effect.
 const CAPTION_PRESETS = [
-    { id: 'visla',   label: 'Visla',      style: 'karaoke', effect: 'box',  highlightColor: '#3B5BFF', baseOpacity: 1.0,  uppercase: false, fontName: 'Liberation Sans', borderWidth: 1 },
     { id: 'tiktok',  label: 'TikTok',     style: 'karaoke', effect: 'none', highlightColor: '#FE2C55', baseOpacity: 0.75, uppercase: false, fontName: 'Verdana', borderWidth: 2 },
     { id: 'reels',   label: 'Reels',      style: 'karaoke', effect: 'none', highlightColor: '#E1306C', baseOpacity: 0.7,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
     { id: 'shorts',  label: 'Shorts Pop', style: 'karaoke', effect: 'pop',  highlightColor: '#FF0000', baseOpacity: 0.7,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
@@ -81,53 +65,28 @@ const swatchClass = (selected) =>
         ? 'ring-2 ring-[color:var(--color-accent)] ring-offset-2 ring-offset-[color:var(--color-paper-2)]'
         : 'ring-1 ring-[color:var(--color-rule-2)] hover:ring-[color:var(--color-accent)]'}`;
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingSubtitle = null, existingHook, bulkCount = 0, bulkProgress }) {
+export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress }) {
     const [position, setPosition] = useState('bottom');
-    const [fontSize, setFontSize] = useState(13);
-    const [fontName, setFontName] = useState('Liberation Sans');
+    // Burn size. Starts at a sane placeholder and is replaced by the server's
+    // CAPTION_FONT_SIZE default when the transcript loads, so the modal burns
+    // exactly what Settings → Captions defines.
+    const [fontSize, setFontSize] = useState(16);
+    const [fontName, setFontName] = useState('Verdana');
     const [fontColor, setFontColor] = useState('#FFFFFF');
-    const [highlightColor, setHighlightColor] = useState('#3B5BFF');
+    const [highlightColor, setHighlightColor] = useState('#FFDD00');
     const [borderColor, setBorderColor] = useState('#000000');
-    const [borderWidth, setBorderWidth] = useState(1);
+    const [borderWidth, setBorderWidth] = useState(2);
     const [bgColor, setBgColor] = useState('#000000');
     const [bgOpacity, setBgOpacity] = useState(0.0);
-    const [animation, setAnimation] = useState('box');
+    const [animation, setAnimation] = useState('pop');
     const [showTextEditor, setShowTextEditor] = useState(false);
 
     // Karaoke (server-side ASS burn) state
-    const [style, setStyle] = useState('karaoke'); // classic | karaoke
-    const [effect, setEffect] = useState('box'); // none | glow | pop | box
+    const [style, setStyle] = useState('classic'); // classic | karaoke
+    const [effect, setEffect] = useState('none'); // none | glow | pop | box
     const [baseOpacity, setBaseOpacity] = useState(1.0);
     const [uppercase, setUppercase] = useState(false);
-    const [activePreset, setActivePreset] = useState('visla');
-    // Manual sync nudge in seconds (positive = captions later). For transcripts
-    // whose word times drift from the audio; applied to burn AND preview.
-    const [timeOffset, setTimeOffset] = useState(0);
-
-    // Synchronize style from clip's existing subtitle settings if present
-    useEffect(() => {
-        if (!isOpen) return;
-        if (existingSubtitle && typeof existingSubtitle === 'object') {
-            const rawSize = existingSubtitle.fontsize ?? existingSubtitle.font_size;
-            if (rawSize) {
-                // If old buggy value was 44 or > 24, reset down to 13
-                setFontSize(rawSize > 24 ? 13 : rawSize);
-            }
-            if (existingSubtitle.font_name) setFontName(existingSubtitle.font_name);
-            if (existingSubtitle.font_color) setFontColor(existingSubtitle.font_color);
-            if (existingSubtitle.highlight_color) setHighlightColor(existingSubtitle.highlight_color);
-            if (existingSubtitle.border_color) setBorderColor(existingSubtitle.border_color);
-            if (existingSubtitle.border_width !== undefined) setBorderWidth(existingSubtitle.border_width);
-            if (existingSubtitle.bg_color) setBgColor(existingSubtitle.bg_color);
-            if (existingSubtitle.bg_opacity !== undefined) setBgOpacity(existingSubtitle.bg_opacity);
-            if (existingSubtitle.alignment) setPosition(existingSubtitle.alignment);
-            if (existingSubtitle.style) setStyle(existingSubtitle.style);
-            if (existingSubtitle.effect) setEffect(existingSubtitle.effect);
-            if (existingSubtitle.base_opacity !== undefined) setBaseOpacity(existingSubtitle.base_opacity);
-            if (existingSubtitle.uppercase !== undefined) setUppercase(existingSubtitle.uppercase);
-            if (existingSubtitle.time_offset !== undefined) setTimeOffset(existingSubtitle.time_offset);
-        }
-    }, [isOpen, existingSubtitle]);
+    const [activePreset, setActivePreset] = useState(null);
 
     const applyPreset = (p) => {
         setActivePreset(p.id);
@@ -141,7 +100,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
         setFontColor('#FFFFFF');
         setBgOpacity(0);
         // Keep the Remotion preview roughly in sync with the burned look
-        setAnimation(p.style === 'karaoke' ? (p.effect === 'pop' ? 'pop' : p.effect === 'glow' ? 'word-highlight' : p.effect === 'box' ? 'box' : 'karaoke') : 'none');
+        setAnimation(p.style === 'karaoke' ? (p.effect === 'pop' ? 'pop' : p.effect === 'glow' ? 'word-highlight' : 'karaoke') : 'none');
     };
 
     // Remotion preview state
@@ -165,6 +124,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                     setOriginalCaptions(data.captions);
                     setEditableText(data.captions.map(c => c.text).join(' '));
                     setDurationSec(data.durationSec || 30);
+                    if (data.defaultFontSize) setFontSize(data.defaultFontSize);
                     setUseRemotionPreview(true);
                 } else {
                     setUseRemotionPreview(false);
@@ -202,14 +162,18 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     const subtitleConfig = {
         captions,
         position,
-        timeOffsetMs: Math.round(timeOffset * 1000),
         style: {
             fontFamily: fontName,
-            fontSize: Math.round(fontSize * 5.67), // Match 1080p ASS render scale
+            // Match the burn: the server renders int(fontSize*0.85) on a
+            // PlayResY=288 virtual canvas, i.e. fontSize*0.85/288 of the frame
+            // height. This comp is 1920 tall, so the same fraction is
+            // fontSize*0.85/288*1920 — the preview and the exported file then
+            // show text at the same relative size.
+            fontSize: Math.round(fontSize * 0.85 * (1920 / 288)),
             fontColor,
             highlightColor,
             borderColor,
-            borderWidth,
+            borderWidth: borderWidth * 1.5,
             bgColor,
             bgOpacity,
             animation,
@@ -232,7 +196,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     const fallbackPreviewStyle = {
         fontFamily: fontName,
         color: fontColor,
-        fontSize: `${Math.round(fontSize * 1.3)}px`,
+        fontSize: '20px',
         fontWeight: 'bold',
         maxWidth: '85%',
         padding: '6px 12px',
@@ -341,48 +305,6 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                             />
                         </div>
 
-                        {/* Subtitle Size Selector */}
-                        <div>
-                            <div className="flex justify-between items-center mb-2">
-                                <p className="eyebrow">Size</p>
-                                <span className="readout">{fontSize <= 10 ? 'Small' : fontSize <= 14 ? 'Medium' : 'Large'} ({fontSize}pt)</span>
-                            </div>
-                            <SegmentedControl
-                                options={SIZE_OPTIONS}
-                                value={fontSize <= 10 ? 'S' : fontSize <= 14 ? 'M' : 'L'}
-                                onChange={(val) => setFontSize(SIZE_TO_FONTSIZE[val] || 13)}
-                                size="sm"
-                            />
-                            <div className="mt-2 flex items-center gap-2">
-                                <span className="text-[10px] text-muted font-bold">A</span>
-                                <input
-                                    type="range"
-                                    min="8"
-                                    max="22"
-                                    value={fontSize}
-                                    onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
-                                    className="w-full accent-[var(--color-accent)]"
-                                />
-                                <span className="text-sm text-muted font-bold">A</span>
-                            </div>
-                        </div>
-
-                        {/* Sync offset: nudge captions against drifted word times */}
-                        <div>
-                            <div className="flex justify-between items-center mb-2">
-                                <p className="eyebrow">Sync offset</p>
-                                <span className="readout">{timeOffset > 0 ? '+' : ''}{timeOffset.toFixed(1)}s</span>
-                            </div>
-                            <input
-                                type="range"
-                                min="-10"
-                                max="10"
-                                value={Math.round(timeOffset * 10)}
-                                onChange={(e) => setTimeOffset(parseInt(e.target.value, 10) / 10)}
-                                className="w-full accent-[var(--color-accent)]"
-                            />
-                        </div>
-
                         {/* Animation Style (new) */}
                         <div>
                             <p className="eyebrow mb-2">Animation</p>
@@ -401,6 +323,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                 <button
                                     type="button"
                                     onClick={() => setShowTextEditor(!showTextEditor)}
+                                    aria-expanded={showTextEditor}
+                                    aria-controls="subtitle-edit-text"
                                     className="w-full flex items-center justify-between mb-2"
                                 >
                                     <span className="eyebrow">Edit text ({captions.length} words)</span>
@@ -408,6 +332,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                 </button>
                                 {showTextEditor && (
                                     <textarea
+                                        id="subtitle-edit-text"
                                         value={editableText}
                                         onChange={(e) => handleTextEdit(e.target.value)}
                                         rows={5}
@@ -540,7 +465,6 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                 position, fontSize, fontName, fontColor, borderColor, borderWidth, bgColor, bgOpacity,
                                 // Karaoke burn (server-side ASS render)
                                 style, effect, baseOpacity, uppercase, highlightColor,
-                                time_offset: timeOffset,
                                 // Remotion data
                                 remotion: useRemotionPreview ? subtitleConfig : null,
                                 captions: textEdited ? captions : null,
@@ -571,13 +495,6 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                                 ? <><Loader2 size={16} className="animate-spin" />applying to all… {bulkProgress.current}/{bulkProgress.total}</>
                                                 : `apply this style to all ${bulkCount} clips`}
                                         </button>
-                                    )}
-                                    {!bulkRunning && (bulkProgress?.errors ?? 0) > 0 && (
-                                        <p className="text-xs text-danger lowercase">{
-                                            bulkProgress.quota
-                                                ? 'quota exceeded: free minutes ran out, top up to finish the rest'
-                                                : `${bulkProgress.errors} of ${bulkProgress.total} failed${bulkProgress.error ? `: ${String(bulkProgress.error).slice(0, 160)}` : ''}`
-                                        }</p>
                                     )}
                                     {/* Clips ship captioned by default, so the way
                                         out has to be here — otherwise a user who

@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.11"
       # Everything the collected tests import at module level, WITHOUT the
-      # heavy ML stack (torch/ultralytics/mediapipe/faster-whisper) — the
+      # heavy ML stack (torch/ultralytics/mediapipe) — the
       # pipeline modules import those lazily behind their feature gates, and
       # the tests exercise the gated-off paths. numpy+opencv cover the layout
       # modules, fastapi/boto3/PyJWT/python-multipart cover importing app.py

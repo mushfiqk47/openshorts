@@ -285,7 +285,7 @@ function SceneRow({ scene, value, widthFraction, previewUrl, touched, playing,
                 style={{ left: `${leftPct}%`, width: `${widthFraction * 100}%` }}
             >
                 {label && (
-                    <span className="absolute top-1 left-1 text-[10px] px-1 rounded bg-brass text-paper lowercase">
+                    <span className="absolute top-1 left-1 text-micro px-1 rounded bg-brass text-paper lowercase">
                         {label}
                     </span>
                 )}

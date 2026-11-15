@@ -1,13 +1,12 @@
 /* Build-time SEO surface generator.
  *
- * Does three things, all at build time and none at runtime:
+ * Does two things, all at build time and none at runtime:
  *
- *   1. Injects crawler-visible content into the empty #root of index.html, so
- *      the homepage is not zero characters of text to a client that does not run
- *      JavaScript.
- *   2. Emits the standalone static pages under /alternatives, /free-ai-clip-generator
- *      and so on, as complete HTML documents that need no JS at all.
- *   3. Emits sitemap.xml and llms.txt from the same page list, so the three can
+ *   1. Emits the standalone static pages under /alternatives, /free-ai-clip-generator
+ *      and so on, as complete HTML documents that need no JS at all. The runtime
+ *      landing page (and with it the homepage crawler-content injection) was
+ *      removed; the app itself is the homepage now.
+ *   2. Emits sitemap.xml and llms.txt from the same page list, so the two can
  *      never drift apart.
  *
  * nginx serves these with `try_files $uri $uri/ /index.html`, so a page emitted
@@ -19,7 +18,6 @@ import { SITE } from './seo/data.js'
 import { buildPages, relatedFor } from './seo/pages.js'
 import { legalPages } from './seo/legal.js'
 import { renderPage } from './seo/render.js'
-import { LANDING_FALLBACK } from './seo/landing-fallback.js'
 
 const sitemapXml = (pages) => {
   const url = (loc, priority, changefreq) =>
@@ -81,7 +79,7 @@ const notFoundPage = () => ({
   body: `
 <h2>Where you probably wanted to go</h2>
 <ul>
-  <li><a href="${SITE.url}/">The app and the landing page</a>, where you can paste a video link and get clips.</li>
+  <li><a href="${SITE.url}/">The app</a>, where you can paste a video link and get clips.</li>
   <li><a href="/how-openshorts-works">How OpenShorts works</a>, the pipeline stage by stage.</li>
   <li><a href="/alternatives">Comparisons</a> against Opus Clip, Klap, Vizard and Submagic.</li>
   <li><a href="https://api.openshorts.app/gallery" rel="noopener">The public video gallery</a>, which is served from the API host.</li>
@@ -96,21 +94,6 @@ export default function seoPlugin() {
   return {
     name: 'openshorts-seo',
     apply: 'build',
-
-    transformIndexHtml(html) {
-      if (!html.includes('<div id="root"></div>')) {
-        // Fail loudly rather than shipping an empty homepage to AI crawlers
-        // again. If the root element is renamed this must be updated with it.
-        throw new Error(
-          '[openshorts-seo] could not find <div id="root"></div> in index.html; ' +
-            'the crawler-visible homepage content was not injected.'
-        )
-      }
-      return html.replace(
-        '<div id="root"></div>',
-        `<div id="root">${LANDING_FALLBACK}</div>`
-      )
-    },
 
     generateBundle() {
       for (const page of pages) {

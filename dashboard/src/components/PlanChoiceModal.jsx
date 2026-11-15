@@ -49,7 +49,7 @@ export default function PlanChoiceModal({ onClose }) {
           {/* Free — the default */}
           <div className="card p-5 flex flex-col border-brass">
             <div className="flex items-center justify-between mb-1">
-              <h3 className="font-display lowercase text-lg text-ink">free</h3>
+              <h3 className="font-display font-medium lowercase text-lg text-ink">free</h3>
               <span className="badge-ok">$0</span>
             </div>
             <p className="text-muted text-xs mb-3 lowercase">try it on your own videos</p>
@@ -67,7 +67,7 @@ export default function PlanChoiceModal({ onClose }) {
           {/* Paid — compact list */}
           <div className="card p-5 flex flex-col">
             <div className="flex items-center justify-between mb-1">
-              <h3 className="font-display lowercase text-lg text-ink">paid plans</h3>
+              <h3 className="font-display font-medium lowercase text-lg text-ink">paid plans</h3>
               <Zap size={16} className="text-brass" />
             </div>
             <p className="text-muted text-xs mb-3 lowercase">no watermark · more minutes · durable library</p>

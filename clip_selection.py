@@ -106,7 +106,7 @@ def compact_words(words, precision=2):
 def build_transcript_windows(transcript_result, video_duration,
                              window_seconds=90, overlap_seconds=30):
     """
-    Build scoring windows aligned to Whisper segment boundaries, so a sentence
+    Build scoring windows aligned to transcript segment boundaries, so a sentence
     (and usually a viral moment) is never cut in half mid-window. Windows grow
     segment by segment to roughly window_seconds (up to 1.25x for the closing
     segment) and the next window starts ~overlap_seconds before the previous

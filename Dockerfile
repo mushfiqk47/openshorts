@@ -19,22 +19,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # are only imported when BILLING_ENABLED is set. Harmless/unused in self-host.
 RUN pip install --no-cache-dir -r requirements-billing.txt
 
-# GPU build (--build-arg GPU=1): user-space CUDA libs only — the NVIDIA
-# container runtime injects the driver. cuBLAS 12 + cuDNN 9 for CTranslate2
-# (faster-whisper CUDA), onnx-asr + onnxruntime-gpu for Parakeet, plus a CUDA
-# torch build so YOLO/TransNetV2 leave the CPU. Adds ~2GB,
-# so the default CPU image stays slim.
-ARG GPU=0
-RUN if [ "$GPU" = "1" ]; then \
-      pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu126 \
-        "torch==2.11.0" "torchvision==0.26.0" \
-      || pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu126 \
-        torch torchvision; \
-      pip install --no-cache-dir \
-        "nvidia-cublas-cu12<13" "nvidia-cudnn-cu12>=9,<10" \
-        onnx-asr onnxruntime-gpu; \
-    fi
-
 # Final stage
 FROM python:3.11-slim
 
@@ -53,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
     npm \
     git \
+    curl \
     fontconfig \
     fonts-liberation \
     fonts-noto-color-emoji \
@@ -78,8 +63,27 @@ ENV PYTHONUNBUFFERED=1
 # NVIDIA runtime. LD_LIBRARY_PATH points at the pip-installed CUDA libs
 # (paths simply don't exist in CPU images); DRIVER_CAPABILITIES asks the
 # runtime for compute (CUDA) + video (NVENC) driver libs.
-ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cu13/lib
+ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cu13/lib
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+
+# NeMo-Speech.cpp runtime — transcription (parakeet-tdt-0.6b-v3 GGUF, CUDA).
+# Prebuilt release archive with its user-space CUDA libs bundled, so the image
+# needs no CUDA toolkit; the NVIDIA container runtime injects the driver.
+# The archive is verified against the .sha256 published with the release.
+ARG GPU=0
+ARG NEMO_SPEECH_VERSION=0.3.0
+RUN set -eux; \
+    backend=cpu; \
+    if [ "$GPU" = "1" ]; then backend=cuda; fi; \
+    base="https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v${NEMO_SPEECH_VERSION}"; \
+    curl -fsSL -o /tmp/nemo.tar.gz "${base}/nemo-speech-${NEMO_SPEECH_VERSION}-linux-x86_64-${backend}.tar.gz"; \
+    curl -fsSL -o /tmp/nemo.tar.gz.sha256 "${base}/nemo-speech-${NEMO_SPEECH_VERSION}-linux-x86_64-${backend}.tar.gz.sha256"; \
+    echo "$(awk 'NR==1{print $1}' /tmp/nemo.tar.gz.sha256)  /tmp/nemo.tar.gz" | sha256sum -c -; \
+    mkdir -p /opt/nemo-speech; \
+    tar -xzf /tmp/nemo.tar.gz -C /opt/nemo-speech; \
+    rm -f /tmp/nemo.tar.gz /tmp/nemo.tar.gz.sha256; \
+    ln -sf "$(find /opt/nemo-speech -type f -name nemo-speech | head -1)" /usr/local/bin/nemo-speech
+ENV NEMO_SPEECH_BIN=/usr/local/bin/nemo-speech
 
 # Latest yt-dlp (nightly — it updates frequently) plus its helper plugin.
 RUN pip install --upgrade --pre --no-cache-dir "yt-dlp[default]" bgutil-ytdlp-pot-provider
@@ -97,10 +101,10 @@ RUN mkdir -p /usr/local/share/fonts/openshorts \
 # Create a non-root user (Moved up)
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
 
-# Create directories including Ultralytics cache config. /app/.cache/huggingface
+# Create directories including Ultralytics cache config. /app/.cache/nemo-speech
 # exists in-image (appuser-owned via the chown below) so a persistent volume
 # mounted there inherits writable ownership for the ASR model downloads.
-RUN mkdir -p /app/uploads /app/output /app/.cache/huggingface /tmp/Ultralytics
+RUN mkdir -p /app/uploads /app/output /app/.cache/nemo-speech /tmp/Ultralytics
 # Fix permissions: /app for code/uploads, /tmp/Ultralytics for AI cache
 RUN chown -R appuser:appuser /app /tmp/Ultralytics
 
