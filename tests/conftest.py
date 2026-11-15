@@ -17,3 +17,7 @@ os.environ["BILLING_ENABLED"] = "0"
 # variable, so an empty value blocks the .env one; tests that need the remote
 # path set their own.
 os.environ["NEMO_ASR_URL"] = ""
+
+# And the YouTube-ingest gate: the URL-source endpoint tests need ingest enabled,
+# so the personal .env must not be able to disable it under the suite.
+os.environ["DISABLE_YOUTUBE_URL"] = "false"
