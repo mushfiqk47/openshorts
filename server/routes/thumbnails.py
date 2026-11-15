@@ -12,6 +12,8 @@ from pydantic import BaseModel
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
 import httpx
 
+from upload_post_client import UPLOAD_URL, auth_headers
+
 from server import state
 from server.state import (
     thumbnail_sessions,
@@ -475,8 +477,8 @@ async def thumbnail_publish(
     def do_upload():
         """Runs in a thread via BackgroundTasks — does the actual multipart upload."""
         try:
-            upload_url = "https://api.upload-post.com/api/upload"
-            headers = {"Authorization": f"Apikey {upload_key}"}
+            upload_url = UPLOAD_URL
+            headers = auth_headers(upload_key)
             data_payload = {
                 "user": post_user,
                 "platform[]": ["youtube"],

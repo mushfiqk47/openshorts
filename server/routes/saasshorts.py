@@ -25,6 +25,7 @@ from saasshorts import (
     DEFAULT_VOICES,
 )
 from s3_uploader import upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
+from upload_post_client import UPLOAD_URL, auth_headers
 
 from server import state
 from server.state import TIKTOK_POST_MODE, _safe_under, _metering, _cloud_config
@@ -304,8 +305,8 @@ async def saasshorts_post_to_socials(req: SaaSPostRequest, request: Request):
         if not final_description:
             final_description = script.get("full_narration", "Check this out!")
 
-        url = "https://api.upload-post.com/api/upload"
-        headers = {"Authorization": f"Apikey {upload_key}"}
+        url = UPLOAD_URL
+        headers = auth_headers(upload_key)
 
         data_payload = {
             "user": post_user,

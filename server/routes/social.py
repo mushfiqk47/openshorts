@@ -11,6 +11,14 @@ from pydantic import BaseModel
 
 import httpx
 
+from upload_post_client import (
+    POST_ANALYTICS_CACHED_URL,
+    SCHEDULE_URL,
+    USERS_URL,
+    auth_headers,
+    profile_analytics_url,
+)
+
 from server import state
 from server.state import jobs, TIKTOK_POST_MODE
 from server.billing import (
@@ -74,10 +82,8 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
         final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
         
         # Prepare form data
-        url = "https://api.upload-post.com/api/upload"
-        headers = {
-            "Authorization": f"Apikey {upload_key}"
-        }
+        url = UPLOAD_URL
+        headers = auth_headers(upload_key)
 
         # Prepare data as dict (httpx handles lists for multiple values)
         data_payload = {
@@ -144,9 +150,9 @@ async def get_social_user(request: Request):
     if not api_key:
          raise HTTPException(status_code=400, detail="Missing X-Upload-Post-Key header")
 
-    url = "https://api.upload-post.com/api/uploadposts/users"
+    url = USERS_URL
     print(f"🔍 Fetching User ID from: {url}")
-    headers = {"Authorization": f"Apikey {api_key}"}
+    headers = auth_headers(api_key)
     
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -238,7 +244,7 @@ async def _social_analytics_auth(request: Request, byok_profile: Optional[str]):
 
 
 async def _upload_post_get(api_key: str, url: str, params: dict):
-    headers = {"Authorization": f"Apikey {api_key}"}
+    headers = auth_headers(api_key)
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.get(url, headers=headers, params=params)
     if resp.status_code != 200:
@@ -256,7 +262,7 @@ async def social_profile_analytics(
     api_key, profile = await _social_analytics_auth(request, user)
     return await _upload_post_get(
         api_key,
-        f"https://api.upload-post.com/api/analytics/{profile}",
+        profile_analytics_url(profile),
         {"platforms": platforms},
     )
 
@@ -280,7 +286,7 @@ async def social_post_analytics(
             params[key] = value
     return await _upload_post_get(
         api_key,
-        "https://api.upload-post.com/api/uploadposts/post-analytics/cached",
+        POST_ANALYTICS_CACHED_URL,
         params,
     )
 
@@ -335,7 +341,7 @@ async def social_total_impressions(
     for _page in range(5):  # 1000 posts is far beyond any real profile window
         data = await _upload_post_get(
             api_key,
-            "https://api.upload-post.com/api/uploadposts/post-analytics/cached",
+            POST_ANALYTICS_CACHED_URL,
             params,
         )
         rows = data.get("posts") or data.get("data") or data.get("items") or []
@@ -370,7 +376,7 @@ async def _scheduled_posts_for(api_key: str, profile: str) -> list:
     endpoint; do not "simplify" it away.
     """
     data = await _upload_post_get(
-        api_key, "https://api.upload-post.com/api/uploadposts/schedule", {})
+        api_key, SCHEDULE_URL, {})
     rows = data.get("scheduled_posts") or data.get("data") or []
     return [r for r in rows
             if isinstance(r, dict) and r.get("profile_username") == profile]
@@ -393,11 +399,10 @@ async def social_cancel_scheduled(job_id: str, request: Request, user: Optional[
     if not any(r.get("job_id") == job_id for r in rows):
         # 404 rather than 403: never confirm that someone else's job exists.
         raise HTTPException(status_code=404, detail="Scheduled post not found")
-    headers = {"Authorization": f"Apikey {api_key}"}
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.delete(
-            f"https://api.upload-post.com/api/uploadposts/schedule/{job_id}",
-            headers=headers)
+            f"{SCHEDULE_URL}/{job_id}",
+            headers=auth_headers(api_key))
     if resp.status_code not in (200, 202, 204):
         raise HTTPException(status_code=resp.status_code,
                             detail=f"Vendor API Error: {resp.text}")

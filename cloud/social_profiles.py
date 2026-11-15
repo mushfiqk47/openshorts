@@ -15,7 +15,8 @@ from .models import UploadPostProfile
 
 router = APIRouter()
 
-API_BASE = "https://api.upload-post.com/api"
+# Single source of the vendor base lives in the root vendor client.
+from upload_post_client import API_BASE  # noqa: F402
 CONNECT_PLATFORMS = ["tiktok", "instagram", "youtube"]
 
 
