@@ -91,7 +91,7 @@ ${faqBlock([
   },
   {
     q: `Can I switch from ${c.name} without losing quality?`,
-    a: `The pipelines are comparable on the core job. OpenShorts transcribes with faster-whisper at word level, detects scenes with PySceneDetect, and scores moments with Google Gemini 3.0 Flash, then reframes with MediaPipe face tracking stabilised against jitter. The honest difference is caption styling, where the commercial tools generally ship more presets.`,
+    a: `The pipelines are comparable on the core job. OpenShorts transcribes with NeMo-Speech.cpp at word level, detects scenes with PySceneDetect, and scores moments with an AI model (Google Gemini Flash by default), then reframes with MediaPipe face tracking stabilised against jitter. The honest difference is caption styling, where the commercial tools generally ship more presets.`,
   },
   {
     q: `Does OpenShorts put a watermark on clips?`,
@@ -204,7 +204,7 @@ const freeClipGenerator = () => ({
   breadcrumb: [{ name: 'Free AI clip generator' }],
   tldr: [
     'OpenShorts self-hosted is a free AI clip generator under the MIT licence. No watermark, no usage cap, no subscription. You run it with Docker and supply your own Google Gemini API key, whose free tier covers 1,500 requests a day.',
-    'It turns a long video into 3 to 15 vertical clips: faster-whisper transcribes at word level, PySceneDetect finds the cuts, Gemini 3.0 Flash scores the moments, and MediaPipe face tracking reframes each one to 9:16.',
+    'It turns a long video into 3 to 15 vertical clips: NeMo-Speech.cpp transcribes at word level, PySceneDetect finds the cuts, an AI model scores the moments, and MediaPipe face tracking reframes each one to 9:16.',
     'If you do not want to run anything, OpenShorts Cloud gives you 20 free minutes a month with a watermark, and paid plans from $12/month without one.',
   ],
   body: `
@@ -227,16 +227,17 @@ under MIT, and you can read all of it.</p>
 </ol>
 
 <h2>What do you need to run it?</h2>
-<p>Any machine with Docker. 8GB of RAM and a modern multi-core CPU is the
-realistic floor. An NVIDIA GPU is optional and changes the numbers a lot: on CPU
-an 8-minute video takes roughly 5 to 8 minutes to process, and on a GPU the same
-video takes about 50 seconds. Linux, macOS and Windows via WSL2 all work, and
-Docker Compose pulls Python 3.11, FFmpeg, YOLOv8, MediaPipe and faster-whisper
-for you.</p>
+<p>A machine with Docker and an NVIDIA GPU. 8GB of RAM is the realistic floor.
+Transcription runs on CUDA and refuses CPU by design, so the GPU is required
+rather than optional: an 8-minute video processes in about 50 seconds. Linux,
+macOS and Windows via WSL2 all work, and Docker Compose pulls Python 3.11,
+FFmpeg, YOLOv8, MediaPipe and the NeMo-Speech.cpp transcription runtime for
+you.</p>
 
 <h2>Is a free clip generator good enough for real posting?</h2>
 <p>It depends on what you are comparing against. The moment detection uses the
-same class of model the paid tools use, Google Gemini 3.0 Flash, and the
+same class of model the paid tools use, Google Gemini Flash by default with
+OpenRouter, Ollama and custom endpoints also supported, and the
 reframing uses MediaPipe with a YOLOv8 fallback and a stabiliser that holds the
 camera still inside a safe zone rather than chasing every head movement. Where
 the commercial tools are ahead is caption styling: they ship more presets and
@@ -294,7 +295,7 @@ const openSourceClipper = () => ({
   breadcrumb: [{ name: 'Open source video clipper' }],
   tldr: [
     'OpenShorts is an MIT-licensed video clipper that runs entirely on your own hardware via Docker Compose. Source video never leaves the machine.',
-    'The stack is Python 3.11, FastAPI, faster-whisper, PySceneDetect, MediaPipe, YOLOv8, FFmpeg and Google Gemini 3.0 Flash, with a React dashboard.',
+    'The stack is Python 3.11, FastAPI, NeMo-Speech.cpp, PySceneDetect, MediaPipe, YOLOv8, FFmpeg and Google Gemini Flash, with a React dashboard.',
     'It is the only open source tool in this category. Opus Clip, Klap, Vizard and Submagic are all closed-source cloud services.',
   ],
   body: `
@@ -393,9 +394,10 @@ to stop the crop from flipping between people every time someone nods, and to
 hold position through brief occlusions.</p>
 
 <h2>How long does it take?</h2>
-<p>On a typical CPU, an 8-minute source video takes roughly 5 to 8 minutes end to
-end. On an NVIDIA GPU the same video takes about 50 seconds. The gap is almost
-entirely transcription and encoding; the model call is a small fraction of it.</p>
+<p>An NVIDIA GPU is required: transcription runs on CUDA and refuses CPU by
+design. On one, an 8-minute source video takes about 50 seconds end to end. The
+gap is almost entirely transcription and encoding; the model call is a small
+fraction of it.</p>
 
 <h2>What does it cost to run?</h2>
 ${pricingParagraph}
@@ -403,7 +405,7 @@ ${pricingParagraph}
 ${faqBlock([
   {
     q: 'What AI model does OpenShorts use to find viral moments?',
-    a: 'Google Gemini 3.0 Flash. It receives the word-level transcript with timestamps together with PySceneDetect scene boundaries, and returns 3 to 15 segments of 15 to 60 seconds scored on hook strength, emotional payload and whether the segment stands alone without surrounding context.',
+    a: 'Google Gemini Flash by default, with OpenRouter, Ollama and custom endpoints supported. It receives the word-level transcript with timestamps together with PySceneDetect scene boundaries, and returns 3 to 15 segments of 15 to 60 seconds scored on hook strength, emotional payload and whether the segment stands alone without surrounding context.',
   },
   {
     q: 'How does the automatic vertical cropping work?',
@@ -418,7 +420,7 @@ ${faqBlock([
   faq: [
     {
       q: 'What AI model does OpenShorts use to find viral moments?',
-      a: 'Google Gemini 3.0 Flash, which receives the word-level transcript with timestamps together with PySceneDetect scene boundaries and returns 3 to 15 segments of 15 to 60 seconds.',
+      a: 'Google Gemini Flash by default, with other OpenAI-compatible providers supported. It receives the word-level transcript with timestamps together with PySceneDetect scene boundaries and returns 3 to 15 segments of 15 to 60 seconds.',
     },
     {
       q: 'How does the automatic vertical cropping work?',
@@ -642,7 +644,7 @@ one side of the table.</p>
 <h2>From episode to posted clips, step by step</h2>
 <ol>
 <li>Paste the episode's YouTube link or upload the file. Podcasts of an hour or more are the normal case, not the limit.</li>
-<li>faster-whisper transcribes with word-level timestamps, and PySceneDetect maps the cuts.</li>
+<li>NeMo-Speech.cpp transcribes with word-level timestamps, and PySceneDetect maps the cuts.</li>
 <li>Google Gemini reads the transcript against the scene boundaries and returns the 3 to 15 segments that stand alone best, 15 to 60 seconds each.</li>
 <li>Each segment is reframed for its content: split layout for two-shots, face tracking for single speakers, screencast layout if the episode shares a screen.</li>
 <li>Subtitles are burned in from the word-level transcript, and finished clips post directly to TikTok, Instagram Reels and YouTube Shorts, or come back through the API.</li>
@@ -913,9 +915,9 @@ did. Two credentials, no polling loop, no TikTok or Instagram OAuth app.</p>
 <h2>Download the workflow</h2>
 <p>The JSON lives in the project repository, not behind an email form:</p>
 <ul>
-<li><a href="${SITE.repo}/blob/main/examples/n8n/openshorts-content-machine.json" rel="noopener">openshorts-content-machine.json</a> — the full four-stage machine described below.</li>
-<li><a href="${SITE.repo}/blob/main/examples/n8n/openshorts-clip-and-notify.json" rel="noopener">openshorts-clip-and-notify.json</a> — the minimal version: a form takes a video URL, a signed webhook returns the clips.</li>
-<li><a href="${SITE.repo}/tree/main/examples/n8n" rel="noopener">Setup notes</a> — credentials, the webhook secret, and the known limits.</li>
+<li><a href="${SITE.repo}/blob/main/examples/n8n/openshorts-content-machine.json" rel="noopener">openshorts-content-machine.json</a>: the full four-stage machine described below.</li>
+<li><a href="${SITE.repo}/blob/main/examples/n8n/openshorts-clip-and-notify.json" rel="noopener">openshorts-clip-and-notify.json</a>: the minimal version, where a form takes a video URL and a signed webhook returns the clips.</li>
+<li><a href="${SITE.repo}/tree/main/examples/n8n" rel="noopener">Setup notes</a>: credentials, the webhook secret, and the known limits.</li>
 </ul>
 <p>In n8n: <strong>Workflows → Import from file</strong>, then fill in your channel
 id and chat id where the sticky notes on the canvas say so.</p>

@@ -12,7 +12,7 @@
  *
  * Substantive choices are documented in the repo history: consumer-withdrawal
  * wording follows arts. 98.8/103.a/108 TRLGDCU as read after CJEU C-234/25
- * (SaaS is a digital service, not digital content — the right survives but is
+ * (SaaS is a digital service, not digital content: the right survives but is
  * paid pro-rata); the 15-day renewal reminder follows Ley 10/2025; the
  * moderation/takedown sections implement DSA arts. 11-17 for a hosting
  * service; AI labelling follows AI Act art. 50.
@@ -64,14 +64,14 @@ use, to the extent of our rights in them. On the free plan, clips carry an
 OpenShorts watermark; you may use watermarked clips freely but you may not
 remove or obscure the watermark by any means other than upgrading to a paid
 plan.</p>
-<p>We do not use your content to train AI models — ours or anyone else's. See
+<p>We do not use your content to train AI models, ours or anyone else's. See
 Section 7.</p>
 <p>With your separate permission (for example, if you reply yes when we ask), we
 may mention your name or showcase your public clips as customer references. We
 never do this by default.</p>
 
 <h2>5. Your promises about the content</h2>
-<p>The service processes content on your instruction — both files you upload
+<p>The service processes content on your instruction: both files you upload
 and videos you direct us to fetch from a URL. You promise that, for every video
 you submit by either route:</p>
 <ul>
@@ -91,7 +91,7 @@ we may produce that record if a dispute arises. Submitting other people's
 content without permission is the thing most likely to get an account
 terminated under Section 16.</p>
 
-<h2>6. Personal data in your videos — our role as processor</h2>
+<h2>6. Personal data in your videos: our role as processor</h2>
 <p>Videos often contain personal data of the people who appear in them. For
 that data, you are the controller and we act as your processor under Article 28
 GDPR: we process the footage only on your documented instructions (the jobs you
@@ -104,7 +104,7 @@ info@openshorts.app. When you use bring-your-own-key mode, your content flows
 directly between your instance and the AI provider under your own agreement
 with them.</p>
 
-<h2>7. AI processing — what runs where</h2>
+<h2>7. AI processing: what runs where</h2>
 <p>The service uses AI systems to do its work, and we name them: transcription
 runs on our own servers (Whisper-family and NVIDIA Parakeet models); moment
 selection, titling and layout decisions use Google's Gemini API; optional voice
@@ -226,7 +226,7 @@ injury, or to any liability that cannot be limited under Spanish or EU law.</p>
 <h2>16. Indemnity, suspension and termination</h2>
 <p>If a third party brings a claim against us because of content you submitted
 or instructed us to fetch, or because of your breach of these Terms, you will
-indemnify us — including our directors, employees and suppliers — for the
+indemnify us (including our directors, employees and suppliers) for the
 resulting damages, penalties and reasonable defence costs, except to the extent
 the claim results from our own breach. If you are a consumer, this obligation
 applies only to claims caused by your breach of these Terms or of the law.</p>
@@ -247,7 +247,7 @@ apply and we will refund any unused prepaid period.</p>
 <h2>18. Governing law and disputes</h2>
 <p>These Terms are governed by Spanish law, without prejudice to the mandatory
 consumer protection rules of your country of residence. Disputes are submitted
-to the courts of Málaga, Spain — except that if you are a consumer, you keep
+to the courts of Málaga, Spain, except that if you are a consumer, you keep
 the right to sue and be sued in the courts of your own domicile, and you may
 use the consumer mediation and arbitration bodies available in your country of
 residence. Complaints route: write to info@openshorts.app first; most issues
@@ -298,14 +298,14 @@ comercial, en la medida de nuestros derechos sobre ellos. En el plan gratuito
 los clips llevan una marca de agua de OpenShorts; puedes usarlos libremente,
 pero no puedes eliminarla ni ocultarla por otro medio que no sea pasar a un
 plan de pago.</p>
-<p>No usamos tu contenido para entrenar modelos de IA — ni nuestros ni de
+<p>No usamos tu contenido para entrenar modelos de IA, ni nuestros ni de
 terceros. Ver cláusula 7.</p>
 <p>Con tu permiso expreso (por ejemplo, si nos dices que sí cuando te lo
 pidamos) podremos citarte como cliente o mostrar tus clips públicos como
 referencia. Nunca lo hacemos por defecto.</p>
 
 <h2>5. Lo que garantizas sobre el contenido</h2>
-<p>El servicio procesa contenido siguiendo tu instrucción — tanto archivos que
+<p>El servicio procesa contenido siguiendo tu instrucción: tanto archivos que
 subes como vídeos que nos ordenas descargar desde una URL. Garantizas que, para
 cada vídeo que envías por cualquiera de las dos vías:</p>
 <ul>
@@ -325,7 +325,7 @@ navegador, y podremos aportar ese registro si surge una disputa. Enviar
 contenido ajeno sin permiso es lo que con más probabilidad termina en la
 cancelación de una cuenta según la cláusula 16.</p>
 
-<h2>6. Datos personales en tus vídeos — nuestro papel de encargado</h2>
+<h2>6. Datos personales en tus vídeos: nuestro papel de encargado</h2>
 <p>Los vídeos suelen contener datos personales de quienes aparecen en ellos.
 Respecto de esos datos tú eres el responsable del tratamiento y nosotros
 actuamos como tu encargado conforme al artículo 28 del RGPD: tratamos el
@@ -339,7 +339,7 @@ solicítalo en info@openshorts.app. En el modo con claves propias (BYOK), tu
 contenido fluye directamente entre tu instancia y el proveedor de IA bajo tu
 propio acuerdo con él.</p>
 
-<h2>7. Procesamiento con IA — qué se ejecuta y dónde</h2>
+<h2>7. Procesamiento con IA: qué se ejecuta y dónde</h2>
 <p>El servicio usa sistemas de IA y los nombramos: la transcripción se ejecuta
 en nuestros propios servidores (modelos de la familia Whisper y NVIDIA
 Parakeet); la selección de momentos, los títulos y las decisiones de encuadre
@@ -466,8 +466,8 @@ Derecho español o de la UE.</p>
 
 <h2>16. Indemnidad, suspensión y cancelación</h2>
 <p>Si un tercero nos reclama por contenido que enviaste o nos ordenaste
-descargar, o por tu incumplimiento de estos Términos, nos mantendrás indemnes —
-incluidos nuestros administradores, empleados y proveedores — de los daños,
+descargar, o por tu incumplimiento de estos Términos, nos mantendrás indemnes (incluidos nuestros administradores, empleados y
+proveedores) de los daños,
 sanciones y costes razonables de defensa resultantes, salvo en la medida en que
 la reclamación derive de nuestro propio incumplimiento. Si eres consumidor,
 esta obligación se aplica únicamente a reclamaciones causadas por tu
@@ -491,7 +491,7 @@ disfrutado.</p>
 <h2>18. Ley aplicable y disputas</h2>
 <p>Estos Términos se rigen por la ley española, sin perjuicio de las normas
 imperativas de protección de los consumidores de tu país de residencia. Las
-disputas se someten a los juzgados y tribunales de Málaga, España — con la
+disputas se someten a los juzgados y tribunales de Málaga, España, con la
 salvedad de que, si eres consumidor, conservas el derecho a demandar y ser
 demandado ante los tribunales de tu propio domicilio, y puedes acudir a los
 sistemas de mediación y arbitraje de consumo de tu país de residencia. Vía de
@@ -502,7 +502,7 @@ se resuelven en días.</p>
 const PRIVACY_EN = `
 <h2>1. Who is responsible</h2>
 <p>The data controller is TONVI TECH SL (CIF B-19780394), Calle Puerta del Mar
-18, 5th floor, 29005 Málaga, Spain — the company behind OpenShorts
+18, 5th floor, 29005 Málaga, Spain: the company behind OpenShorts
 (openshorts.app). For anything about your data, write to info@openshorts.app.
 This policy is also available in <a href="/privacidad">Spanish</a>; for
 residents of Spain, the Spanish version prevails in case of discrepancy.</p>
@@ -523,7 +523,7 @@ because tax law requires it. Basis: contract (Art. 6.1.b) and legal obligation
 clips generated from them are processed to deliver exactly the job you
 requested. Basis: contract (Art. 6.1.b). Where a video contains personal data
 of other people (their image, their voice), you are the controller of that
-data and we act as your processor on your instructions — see Section 6 of the
+data and we act as your processor on your instructions; see Section 6 of the
 <a href="/terms">Terms of Service</a>.</p>
 <h3>Your rights declaration</h3>
 <p>Each time you submit a job you confirm you have the rights to the content.
@@ -543,7 +543,7 @@ tracking, and nothing is shared with anyone. Aggregate audience measurement is
 exempt from consent under the Spanish supervisory authority's (AEPD) criteria;
 usage events linked to your account (which features you use, whether jobs
 succeed) are processed under our legitimate interest in improving and securing
-the product (Art. 6.1.f) — you can object at any time by emailing
+the product (Art. 6.1.f): you can object at any time by emailing
 info@openshorts.app.</p>
 <h3>Security and anti-abuse</h3>
 <p>Server logs, IP-based rate limits and fraud signals, kept to protect the
@@ -551,14 +551,14 @@ service and its users. Basis: legitimate interest (Art. 6.1.f).</p>
 <p>We do not process special categories of data (Art. 9 GDPR) as part of the
 service, we make no automated decisions with legal effects on you (Art. 22
 GDPR), and <strong>we do not use your content or your data to train AI models
-— ours or anyone else's — nor sell it.</strong></p>
+(ours or anyone else's) nor sell it.</strong></p>
 
 <h2>3. Cookies and local storage</h2>
 <p>The site sets no third-party cookies and shows no cookie banner because it
 does not need one: everything stored in your browser is strictly necessary to
 provide what you asked for. Specifically: your session token (to keep you
 signed in), your interface preferences (like your last-used editor settings),
-and — if you use bring-your-own-key mode — your AI provider API keys, which
+and (if you use bring-your-own-key mode) your AI provider API keys, which
 are stored encrypted in your own browser and are sent only to perform your
 jobs, never stored on our servers. Our self-hosted, first-party audience
 measurement operates under the AEPD's consent exemption for strictly
@@ -569,19 +569,19 @@ no longer than 25 months.</p>
 <p>We use a short list of providers, each bound by a data processing agreement,
 and only for the purpose stated:</p>
 <ul>
-<li><strong>Google (Gemini API)</strong> — AI analysis of your video's
+<li><strong>Google (Gemini API)</strong>: AI analysis of your video's
 transcript and frames to select moments and layouts. Google's paid API terms
 prohibit using customer data to train models. USA.</li>
-<li><strong>ElevenLabs</strong> — AI dubbing, only when you request it. USA.</li>
-<li><strong>Stripe</strong> — payments and invoicing. USA/EU.</li>
-<li><strong>Cloudflare R2 and Amazon Web Services S3</strong> — storage of your
+<li><strong>ElevenLabs</strong>: AI dubbing, only when you request it. USA.</li>
+<li><strong>Stripe</strong>: payments and invoicing. USA/EU.</li>
+<li><strong>Cloudflare R2 and Amazon Web Services S3</strong>: storage of your
 clips and project files. EU/USA regions.</li>
-<li><strong>Hetzner and Contabo</strong> — the servers the service runs on.
+<li><strong>Hetzner and Contabo</strong>: the servers the service runs on.
 Germany.</li>
-<li><strong>Upload-Post</strong> — publishing to social accounts you connect,
+<li><strong>Upload-Post</strong>: publishing to social accounts you connect,
 only on your instruction. Operated by TONVI TECH SL under this same
 policy.</li>
-<li><strong>Namecheap Private Email</strong> — delivery of service emails.
+<li><strong>Namecheap Private Email</strong>: delivery of service emails.
 USA.</li>
 </ul>
 <p>Where a provider processes data outside the European Economic Area, the
@@ -606,7 +606,7 @@ of limitations for civil claims.</li>
 
 <h2>6. Your rights</h2>
 <p>You can ask us for access, rectification, erasure, restriction, portability
-of your data, and object to processing based on legitimate interest — just
+of your data, and object to processing based on legitimate interest, just
 email info@openshorts.app from your account address; we answer within one
 month. Deleting your account from the dashboard removes your content on the
 schedule above. If you believe we are mishandling your data, you can complain
@@ -626,7 +626,7 @@ reflects the current version.</p>
 const PRIVACY_ES = `
 <h2>1. Responsable del tratamiento</h2>
 <p>El responsable es TONVI TECH SL (CIF B-19780394), Calle Puerta del Mar 18,
-5ª planta, 29005 Málaga, España — la empresa detrás de OpenShorts
+5ª planta, 29005 Málaga, España: la empresa detrás de OpenShorts
 (openshorts.app). Para cualquier cuestión sobre tus datos, escribe a
 info@openshorts.app. Esta política está también disponible en
 <a href="/privacy">inglés</a>; para residentes en España prevalece la versión
@@ -649,7 +649,7 @@ clips generados a partir de ellos se tratan para prestarte exactamente el
 trabajo que solicitaste. Base: contrato (art. 6.1.b). Cuando un vídeo contiene
 datos personales de otras personas (su imagen, su voz), el responsable de esos
 datos eres tú y nosotros actuamos como tu encargado siguiendo tus
-instrucciones — ver cláusula 6 de los <a href="/terminos">Términos de
+instrucciones; ver cláusula 6 de los <a href="/terminos">Términos de
 Servicio</a>.</p>
 <h3>Tu declaración de derechos</h3>
 <p>Cada vez que envías un trabajo confirmas que tienes derechos sobre el
@@ -669,7 +669,7 @@ publicitarios, sin seguimiento entre sitios, y sin compartir nada con nadie.
 La medición de audiencia agregada está exenta de consentimiento según los
 criterios de la AEPD; los eventos de uso vinculados a tu cuenta (qué funciones
 usas, si los trabajos terminan bien) se tratan bajo nuestro interés legítimo en
-mejorar y proteger el producto (art. 6.1.f) — puedes oponerte en cualquier
+mejorar y proteger el producto (art. 6.1.f): puedes oponerte en cualquier
 momento escribiendo a info@openshorts.app.</p>
 <h3>Seguridad y antiabuso</h3>
 <p>Registros del servidor, límites de uso por IP y señales de fraude,
@@ -678,14 +678,14 @@ conservados para proteger el servicio y a sus usuarios. Base: interés legítimo
 <p>No tratamos categorías especiales de datos (art. 9 RGPD) como parte del
 servicio, no tomamos decisiones automatizadas con efectos jurídicos sobre ti
 (art. 22 RGPD) y <strong>no usamos tu contenido ni tus datos para entrenar
-modelos de IA — ni nuestros ni de terceros — ni los vendemos.</strong></p>
+modelos de IA (ni nuestros ni de terceros) ni los vendemos.</strong></p>
 
 <h2>3. Cookies y almacenamiento local</h2>
 <p>El sitio no instala cookies de terceros y no muestra banner de cookies
 porque no lo necesita: todo lo que se guarda en tu navegador es estrictamente
 necesario para prestarte lo que pediste. En concreto: tu token de sesión (para
 mantenerte identificado), tus preferencias de interfaz (como los últimos
-ajustes del editor) y — si usas el modo con claves propias — tus claves API de
+ajustes del editor) y (si usas el modo con claves propias) tus claves API de
 proveedores de IA, que se guardan cifradas en tu propio navegador y solo se
 envían para ejecutar tus trabajos, nunca se almacenan en nuestros servidores.
 Nuestra medición de audiencia propia y autoalojada opera bajo la exención de
@@ -696,21 +696,21 @@ identificadores no viven más de 13 meses y los datos brutos no más de 25.</p>
 <p>Usamos una lista corta de proveedores, cada uno vinculado por un contrato de
 encargo de tratamiento y solo para el fin indicado:</p>
 <ul>
-<li><strong>Google (API Gemini)</strong> — análisis con IA de la transcripción
+<li><strong>Google (API Gemini)</strong>: análisis con IA de la transcripción
 y fotogramas de tu vídeo para seleccionar momentos y encuadres. Las
 condiciones de la API de pago de Google prohíben usar los datos de clientes
 para entrenar modelos. EE. UU.</li>
-<li><strong>ElevenLabs</strong> — doblaje con IA, solo cuando lo solicitas.
+<li><strong>ElevenLabs</strong>: doblaje con IA, solo cuando lo solicitas.
 EE. UU.</li>
-<li><strong>Stripe</strong> — pagos y facturación. EE. UU./UE.</li>
-<li><strong>Cloudflare R2 y Amazon Web Services S3</strong> — almacenamiento de
+<li><strong>Stripe</strong>: pagos y facturación. EE. UU./UE.</li>
+<li><strong>Cloudflare R2 y Amazon Web Services S3</strong>: almacenamiento de
 tus clips y archivos de proyecto. Regiones UE/EE. UU.</li>
-<li><strong>Hetzner y Contabo</strong> — los servidores donde se ejecuta el
+<li><strong>Hetzner y Contabo</strong>: los servidores donde se ejecuta el
 servicio. Alemania.</li>
-<li><strong>Upload-Post</strong> — publicación en las cuentas sociales que
+<li><strong>Upload-Post</strong>: publicación en las cuentas sociales que
 conectes, solo siguiendo tu instrucción. Operado por TONVI TECH SL bajo esta
 misma política.</li>
-<li><strong>Namecheap Private Email</strong> — entrega de los emails de
+<li><strong>Namecheap Private Email</strong>: entrega de los emails de
 servicio. EE. UU.</li>
 </ul>
 <p>Cuando un proveedor trata datos fuera del Espacio Económico Europeo, la
@@ -737,7 +737,7 @@ meses.</li>
 
 <h2>6. Tus derechos</h2>
 <p>Puedes pedirnos acceso, rectificación, supresión, limitación y portabilidad
-de tus datos, y oponerte a los tratamientos basados en interés legítimo —
+de tus datos, y oponerte a los tratamientos basados en interés legítimo,
 basta un email a info@openshorts.app desde la dirección de tu cuenta;
 respondemos en el plazo de un mes. Eliminar tu cuenta desde el panel elimina tu
 contenido con el calendario indicado arriba. Si crees que tratamos mal tus
@@ -866,7 +866,7 @@ export function legalPages() {
       published: PUBLISHED,
       updated: PUBLISHED,
       tldr: [
-        'We store your email, your billing reference and the videos you process — nothing beyond what the service needs.',
+        'We store your email, your billing reference and the videos you process, nothing beyond what the service needs.',
         'No third-party trackers and no cookie banner: analytics is self-hosted and first-party, and BYOK API keys live encrypted in your own browser.',
         'Your content is never used to train AI models. Free-plan clips are deleted after 7 days.',
       ],
@@ -882,7 +882,7 @@ export function legalPages() {
       published: PUBLISHED,
       updated: PUBLISHED,
       tldr: [
-        'openshorts.app is operated by TONVI TECH SL, CIF B-19780394, Calle Puerta del Mar 18, 29005 Málaga, Spain — contact info@openshorts.app.',
+        'openshorts.app is operated by TONVI TECH SL, CIF B-19780394, Calle Puerta del Mar 18, 29005 Málaga, Spain, contact info@openshorts.app.',
       ],
       body: LEGAL_EN,
     },
@@ -914,7 +914,7 @@ export function legalPages() {
       updated: PUBLISHED,
       lang: 'es',
       tldr: [
-        'Guardamos tu email, tu referencia de facturación y los vídeos que procesas — nada más de lo que el servicio necesita.',
+        'Guardamos tu email, tu referencia de facturación y los vídeos que procesas, nada más de lo que el servicio necesita.',
         'Sin rastreadores de terceros y sin banner de cookies: la analítica es propia y autoalojada, y las claves BYOK viven cifradas en tu propio navegador.',
         'Tu contenido nunca se usa para entrenar modelos de IA. Los clips del plan gratuito se eliminan a los 7 días.',
       ],
@@ -931,7 +931,7 @@ export function legalPages() {
       updated: PUBLISHED,
       lang: 'es',
       tldr: [
-        'openshorts.app es un servicio de TONVI TECH SL, CIF B-19780394, Calle Puerta del Mar 18, 29005 Málaga, España — contacto info@openshorts.app.',
+        'openshorts.app es un servicio de TONVI TECH SL, CIF B-19780394, Calle Puerta del Mar 18, 29005 Málaga, España, contacto info@openshorts.app.',
       ],
       body: LEGAL_ES,
     },

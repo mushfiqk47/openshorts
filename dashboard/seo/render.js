@@ -214,7 +214,7 @@ const footer = () => `
 
 /* Internal links are rendered as a visible block rather than a nav bar because
  * an engine reading the raw HTML has no way to weight a nav differently from
- * body copy — a described link is a stronger signal than a bare one. */
+ * body copy: a described link is a stronger signal than a bare one. */
 const relatedBlock = (related) =>
   !related?.length
     ? ''

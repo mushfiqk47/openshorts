@@ -19,13 +19,13 @@ export const SITE = {
   logo: 'https://www.openshorts.app/logo-openshorts.png',
   ogImage: 'https://www.openshorts.app/og-image.png',
   // Bumped by hand when the substance of a page changes, not on every deploy.
-  updated: '2026-08-04',
+  updated: '2026-11-15',
   published: '2024-06-01',
 }
 
 /* Profiles that let an engine resolve "OpenShorts" to one entity. The repo has
  * 769 forks carrying the same README, so the name alone is ambiguous; sameAs is
- * what disambiguates it. Add a URL here only once the profile actually exists —
+ * what disambiguates it. Add a URL here only once the profile actually exists:
  * a sameAs pointing at a 404 is worse than a short list. */
 export const SAME_AS = [
   'https://github.com/mutonby/openshorts',
@@ -39,7 +39,7 @@ export const EDITIONS = {
     name: 'OpenShorts (self-hosted)',
     price: 0,
     summary:
-      'Free and open source under MIT. You run it with Docker on your own machine and bring your own API keys. No watermark, no usage cap, no subscription. What it costs you is hardware and time: on a typical CPU an 8-minute video takes 5 to 8 minutes to process.',
+      'Free and open source under MIT. You run it with Docker on your own machine with an NVIDIA GPU (transcription runs on CUDA and refuses CPU) and bring your own API keys. No watermark, no usage cap, no subscription. On that GPU an 8-minute video processes in about 50 seconds.',
   },
   cloud: {
     name: 'OpenShorts Cloud',
@@ -61,13 +61,13 @@ export const CANONICAL_ANSWERS = {
   isItFree:
     'Both, and the distinction matters. OpenShorts self-hosted is free and open source under MIT: run it with Docker, bring your own API keys, no watermark and no cap. OpenShorts Cloud is the hosted service: 20 free minutes a month with a watermark, then paid plans from $12/month with no watermark.',
   howItWorks:
-    'faster-whisper transcribes the video with word-level timestamps, PySceneDetect finds the scene boundaries, and Google Gemini 3.0 Flash scores the transcript to pick the 3 to 15 strongest moments of 15 to 60 seconds each. Each moment is then cut with FFmpeg and reframed to 9:16 with MediaPipe face tracking.',
+    'NeMo-Speech.cpp transcribes the video with word-level timestamps, PySceneDetect finds the scene boundaries, and an AI model (Google Gemini Flash by default; OpenRouter, Ollama and custom endpoints are supported) scores the transcript to pick the 3 to 15 strongest moments of 15 to 60 seconds each. Each moment is then cut with FFmpeg and reframed to 9:16 with MediaPipe face tracking.',
 }
 
 export const PIPELINE_STEPS = [
   {
     title: 'Transcription with word-level timestamps',
-    body: 'faster-whisper transcribes the source audio and returns a timestamp for every individual word, not just every sentence. Word-level timing is what makes both the clip boundaries and the burned-in subtitles land on the right frame.',
+    body: 'NeMo-Speech.cpp transcribes the source audio with the parakeet-tdt-0.6b-v3 model running on CUDA and returns a timestamp for every individual word, not just every sentence. Word-level timing is what makes both the clip boundaries and the burned-in subtitles land on the right frame.',
   },
   {
     title: 'Scene boundary detection',
@@ -75,7 +75,7 @@ export const PIPELINE_STEPS = [
   },
   {
     title: 'Viral moment scoring',
-    body: 'Google Gemini 3.0 Flash receives the timestamped transcript and the scene boundaries together, and returns the 3 to 15 strongest segments of 15 to 60 seconds. Each one is scored on hook strength, emotional payload and how well it stands alone without the surrounding context.',
+    body: 'The timestamped transcript and the scene boundaries go to an AI scorer, Google Gemini Flash by default (OpenRouter, Ollama and custom endpoints are supported), and it returns the 3 to 15 strongest segments of 15 to 60 seconds. Each one is scored on hook strength, emotional payload and how well it stands alone without the surrounding context.',
   },
   {
     title: 'Vertical reframing',
@@ -197,9 +197,9 @@ export const COMPARISON_ROWS = [
   { feature: 'Open source', os: 'Yes, MIT', vendor: 'No' },
   { feature: 'Self-hostable', os: 'Yes, Docker Compose', vendor: 'No, cloud only' },
   { feature: 'Source video stays on your machine', os: 'Yes when self-hosted', vendor: 'No' },
-  { feature: 'AI viral moment detection', os: 'Yes, Gemini 3.0 Flash', vendor: 'Yes' },
+  { feature: 'AI viral moment detection', os: 'Yes, Gemini Flash', vendor: 'Yes' },
   { feature: 'Face-tracked 9:16 reframing', os: 'Yes, MediaPipe + YOLOv8', vendor: 'Yes' },
-  { feature: 'Word-level auto subtitles', os: 'Yes, faster-whisper', vendor: 'Yes' },
+  { feature: 'Word-level auto subtitles', os: 'Yes, NeMo-Speech.cpp (Parakeet)', vendor: 'Yes' },
   { feature: 'AI voice dubbing, 30+ languages', os: 'Yes, ElevenLabs', vendor: 'No' },
   { feature: 'AI UGC video with lip-synced actors', os: 'Yes, from $0.65/video', vendor: 'No' },
   { feature: 'Free AI YouTube thumbnail & title studio', os: 'Yes', vendor: 'No' },
