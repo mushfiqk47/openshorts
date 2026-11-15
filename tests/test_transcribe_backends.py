@@ -167,6 +167,40 @@ def test_nemo_unreadable_json_raises(fake_nemo, monkeypatch):
         tb._transcribe_with_nemo("video.mp4")
 
 
+# --- remote Colab mode -------------------------------------------------------
+
+def test_remote_success_builds_contract(fake_nemo, monkeypatch):
+    payload = {"text": "hello there", "confidence": 1, "duration": 2.0,
+               "languages": [], "words": [{"word": "hello", "start": 0.0, "end": 0.5},
+                                          {"word": "there", "start": 0.5, "end": 1.0}],
+               "backend": "CUDA0"}
+    calls = []
+    monkeypatch.setattr(tb, "_transcribe_remote", lambda wav: (calls.append(wav) or (payload, 1.2)))
+    monkeypatch.setattr(tb, "_detect_language", lambda text: "en")
+    monkeypatch.setenv("NEMO_ASR_URL", "https://tunnel.example")
+    t = tb._transcribe_with_nemo("video.mp4")
+    assert calls, "remote round-trip never ran"
+    assert t["language"] == "en"
+    assert [w["word"] for w in t["segments"][0]["words"][:1]] == [" hello"]
+
+
+def test_remote_failure_falls_back_to_local_gpu(fake_nemo, monkeypatch):
+    from types import SimpleNamespace as NS
+    monkeypatch.setattr(tb, "_transcribe_remote",
+                        lambda wav: (_ for _ in ()).throw(RuntimeError("tunnel died")))
+    monkeypatch.setattr(tb, "_detect_language", lambda text: "en")
+
+    def fake_run(cmd, **kwargs):
+        if "pull" in cmd:
+            return NS(returncode=0, stdout="cached", stderr="")
+        return NS(returncode=0, stdout=json.dumps(_payload(JFK_WORDS)), stderr=CUDA_STDERR)
+
+    monkeypatch.setattr(tb, "subprocess", SimpleNamespace(run=fake_run))
+    monkeypatch.setenv("NEMO_ASR_URL", "https://tunnel.example")
+    t = tb._transcribe_with_nemo("video.mp4")
+    assert t["text"].startswith("And so, my fellow Americans")
+
+
 # --- live concurrency gate ---------------------------------------------------
 
 def test_env_semaphore_sizes_from_env(monkeypatch):

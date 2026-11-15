@@ -307,44 +307,47 @@ def _transcribe_remote(wav_path):
 
 
 def _transcribe_with_nemo(media_path):
-    remote = bool(_nemo_asr_url())
     model = os.environ.get("NEMO_ASR_MODEL", "").strip() or DEFAULT_NEMO_MODEL
-    if not remote:
-        bin_path = _resolve_nemo_bin()
-        # Self-provisioning: a fresh machine or a new alias downloads its model
-        # here instead of failing deep inside transcribe.
-        ensure_ok, ensure_detail = ensure_model_cached(model)
-        if not ensure_ok:
-            raise RuntimeError(f"ASR model '{model}' unavailable: {ensure_detail}")
+    remote = bool(_nemo_asr_url())
     wav_path = _extract_wav(media_path)
+    payload = None
     try:
         if remote:
             print("🎙️ Transcribing via remote GPU (Colab)…", flush=True)
-            payload, _elapsed = _transcribe_remote(wav_path)
-        else:
+            try:
+                payload, _elapsed = _transcribe_remote(wav_path)
+            except Exception as e:
+                # Colab tunnels are ephemeral: when the remote is unreachable
+                # the local CUDA chain takes over instead of failing the job.
+                print(f"⚠️ remote transcriber unreachable ({e}) — falling back to the local GPU", flush=True)
+                remote = False
+        if payload is None:
+            bin_path = _resolve_nemo_bin()
+            # Self-provisioning: a fresh machine or a new alias downloads its
+            # model here instead of failing deep inside transcribe.
+            ensure_ok, ensure_detail = ensure_model_cached(model)
+            if not ensure_ok:
+                raise RuntimeError(f"ASR model '{model}' unavailable: {ensure_detail}")
             cmd = [bin_path, "transcribe", wav_path, "--model", model, "--format", "json"]
             with _ASR_GATE:
                 proc = subprocess.run(
                     cmd, capture_output=True, text=True, encoding="utf-8",
                     errors="replace", timeout=_ASR_TIMEOUT_SECONDS)
+            if proc.returncode != 0:
+                tail = (proc.stderr or "")[-_STDERR_TAIL_CHARS:].strip()
+                raise RuntimeError(f"nemo-speech transcribe failed ({proc.returncode}): {tail}")
+            _require_cuda(proc.stderr)
+            try:
+                payload = json.loads(proc.stdout)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(
+                    f"nemo-speech returned unreadable JSON ({e}); stderr tail: "
+                    f"{(proc.stderr or '')[-_STDERR_TAIL_CHARS:].strip()}") from e
     finally:
         try:
             os.remove(wav_path)
         except OSError:
             pass
-
-    if not remote:
-        if proc.returncode != 0:
-            tail = (proc.stderr or "")[-_STDERR_TAIL_CHARS:].strip()
-            raise RuntimeError(f"nemo-speech transcribe failed ({proc.returncode}): {tail}")
-        _require_cuda(proc.stderr)
-
-    try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"nemo-speech returned unreadable JSON ({e}); stderr tail: "
-            f"{(proc.stderr or '')[-_STDERR_TAIL_CHARS:].strip()}") from e
 
     words = []
     for w in payload.get("words") or []:
