@@ -60,3 +60,4 @@ check_*.py
 
 # graphify knowledge graph: track the artifacts, not the build sidecars
 graphify-out/.graphify_*
+*.egg-info/
