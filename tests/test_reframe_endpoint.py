@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 app_module = pytest.importorskip("app")
+from server import state as state_module  # noqa: E402
 import recut  # noqa: E402
 
 JOB_ID = "reframe-endpoint-test-job"
@@ -44,8 +45,8 @@ def job(tmp_path, monkeypatch):
     job_dir = out_root / JOB_ID
     job_dir.mkdir(parents=True)
     up_root.mkdir()
-    monkeypatch.setattr(app_module, "OUTPUT_DIR", str(out_root))
-    monkeypatch.setattr(app_module, "UPLOAD_DIR", str(up_root))
+    monkeypatch.setattr(state_module, "OUTPUT_DIR", str(out_root))
+    monkeypatch.setattr(state_module, "UPLOAD_DIR", str(up_root))
 
     clip = {
         "start": 10.0, "end": 40.0,

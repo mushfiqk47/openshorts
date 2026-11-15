@@ -3,7 +3,7 @@ writable through /api/env, so both must be honored without a restart (the old
 placebo-knob bug: one never read env at all, the other froze its semaphore at
 import time)."""
 
-import app as app_module
+from server import state as app_module
 
 
 def test_max_file_size_mb_reads_env_live(monkeypatch):

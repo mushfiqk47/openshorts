@@ -9,7 +9,7 @@ import pytest
 
 # app pulls in dotenv/fastapi/cloud at import time; the minimal CI env lacks
 # them, so skip there. Runs fully in the container/local where deps exist.
-app = pytest.importorskip("app")
+app = pytest.importorskip("server.jobs")
 from cloud.alerts import _classify_failure
 
 

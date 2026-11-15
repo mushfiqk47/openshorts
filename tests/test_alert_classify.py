@@ -53,7 +53,7 @@ def test_recovered_download_attempts_do_not_mask_the_terminal_error():
     succeeds; that per-attempt noise must not turn a Gemini failure into a
     'youtube download' alert (prod 20-ago)."""
     import pytest
-    app_module = pytest.importorskip("app")
+    app_module = pytest.importorskip("server.jobs")
     logs = [
         "📥 Download attempt: HD-direct",
         "⚠️  Download attempt 'HD-direct' failed: ERROR: [youtube] x: Video unavailable.",
@@ -69,7 +69,7 @@ def test_recovered_download_attempts_do_not_mask_the_terminal_error():
 
 def test_terminal_download_failure_still_classifies_as_download():
     import pytest
-    app_module = pytest.importorskip("app")
+    app_module = pytest.importorskip("server.jobs")
     logs = [
         "⚠️  Download attempt 'HD-direct' failed: ERROR: [youtube] x: Video unavailable.",
         "❌ FATAL ERROR: YOUTUBE DOWNLOAD FAILED (all strategies)",

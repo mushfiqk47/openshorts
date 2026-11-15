@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-app_module = pytest.importorskip("app")
+app_module = pytest.importorskip("server.jobs")
 
 _strip_burned_captions = app_module._strip_burned_captions
 _strip_burned_hook = app_module._strip_burned_hook

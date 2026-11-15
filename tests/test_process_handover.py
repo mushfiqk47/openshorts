@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 app_module = pytest.importorskip("app")
+from server import state as state_module  # noqa: E402
 
 TRANSCRIPT = {
     "text": "hello world again",
@@ -51,8 +52,8 @@ def dirs(tmp_path, monkeypatch):
     up_root = tmp_path / "uploads"
     out_root.mkdir()
     up_root.mkdir()
-    monkeypatch.setattr(app_module, "OUTPUT_DIR", str(out_root))
-    monkeypatch.setattr(app_module, "UPLOAD_DIR", str(up_root))
+    monkeypatch.setattr(state_module, "OUTPUT_DIR", str(out_root))
+    monkeypatch.setattr(state_module, "UPLOAD_DIR", str(up_root))
     return out_root, up_root
 
 
@@ -68,7 +69,7 @@ def session(dirs, monkeypatch):
         "transcript_ready": True,
         "transcript": TRANSCRIPT,
     }
-    monkeypatch.setitem(app_module.thumbnail_sessions, "sess1", sess)
+    monkeypatch.setitem(state_module.thumbnail_sessions, "sess1", sess)
     return sess
 
 
@@ -139,7 +140,7 @@ def test_handover_still_requires_attestation(dirs, session):
 
 def test_url_wins_over_session_id(dirs, session, monkeypatch):
     """A request carrying both keeps the historical URL behavior untouched."""
-    monkeypatch.setattr(app_module, "QUALITY_GATE_MIN_HEIGHT", 0)
+    monkeypatch.setattr(state_module, "QUALITY_GATE_MIN_HEIGHT", 0)
     resp = _post_process({
         "thumbnail_session_id": "sess1",
         "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",

@@ -15,6 +15,8 @@ import httpx
 import pytest
 
 app_module = pytest.importorskip("app")
+from server import state as state_module  # noqa: E402
+from server.routes import process as process_routes  # noqa: E402
 
 
 def _post_process(json_body=None, files=None, data=None):
@@ -35,15 +37,15 @@ def dirs(tmp_path, monkeypatch):
     up_root = tmp_path / "uploads"
     out_root.mkdir()
     up_root.mkdir()
-    monkeypatch.setattr(app_module, "OUTPUT_DIR", str(out_root))
-    monkeypatch.setattr(app_module, "UPLOAD_DIR", str(up_root))
+    monkeypatch.setattr(state_module, "OUTPUT_DIR", str(out_root))
+    monkeypatch.setattr(state_module, "UPLOAD_DIR", str(up_root))
     return out_root, up_root
 
 
 def _stub_probe(monkeypatch, duration, max_height=1080):
     async def _probe(url):
         return {"max_height": max_height, "duration": duration}
-    monkeypatch.setattr(app_module, "_probe_youtube_quality", _probe)
+    monkeypatch.setattr(process_routes, "_probe_youtube_quality", _probe)
 
 
 def test_short_url_source_is_rejected(dirs, monkeypatch):
@@ -76,14 +78,14 @@ def test_long_url_source_passes(dirs, monkeypatch):
 
 def test_gate_disabled_lets_short_sources_through(dirs, monkeypatch):
     _stub_probe(monkeypatch, duration=24)
-    monkeypatch.setattr(app_module, "MIN_SOURCE_SECONDS", 0)
+    monkeypatch.setattr(state_module, "MIN_SOURCE_SECONDS", 0)
     resp = _post_process({"url": "https://www.youtube.com/watch?v=short", "acknowledged": True})
     assert resp.status_code == 200
 
 
 def test_short_upload_is_rejected_and_cleaned_up(dirs, monkeypatch):
     out_root, up_root = dirs
-    monkeypatch.setattr(app_module, "_media_duration_seconds", lambda path: 24.0)
+    monkeypatch.setattr(process_routes, "_media_duration_seconds", lambda path: 24.0)
     resp = _post_process(files={"file": ("short.mp4", b"fake-bytes", "video/mp4")},
                          data={"acknowledged": "true"})
     assert resp.status_code == 400
@@ -97,11 +99,11 @@ def test_short_thumbnail_session_is_rejected(dirs, monkeypatch):
     out_root, up_root = dirs
     video = up_root / "thumb_sess1_source.mp4"
     video.write_bytes(b"fake-video-bytes")
-    monkeypatch.setitem(app_module.thumbnail_sessions, "sess1", {
+    monkeypatch.setitem(state_module.thumbnail_sessions, "sess1", {
         "user_id": None, "video_path": str(video),
         "transcript_ready": False, "transcript": None,
     })
-    monkeypatch.setattr(app_module, "_media_duration_seconds", lambda path: 24.0)
+    monkeypatch.setattr(process_routes, "_media_duration_seconds", lambda path: 24.0)
     resp = _post_process({"thumbnail_session_id": "sess1", "acknowledged": True})
     assert resp.status_code == 400
     # The session's own video stays; only the aborted job dir is cleaned.

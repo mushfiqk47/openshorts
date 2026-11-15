@@ -21,7 +21,9 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
-import app as app_module
+from server import state as state_module
+from server.billing import resolve_post_profile
+from server.routes import social as social_routes
 
 
 OTHER_TENANT = "os_deadbeefcafe"
@@ -30,24 +32,24 @@ OTHER_TENANT = "os_deadbeefcafe"
 class TestResolvePostProfileInCloud:
     @pytest.fixture(autouse=True)
     def _cloud(self, monkeypatch):
-        monkeypatch.setattr(app_module, "BILLING_ENABLED", True)
+        monkeypatch.setattr(state_module, "BILLING_ENABLED", True)
 
     def test_uses_the_server_resolved_profile(self):
-        assert app_module.resolve_post_profile("os_mine", None) == "os_mine"
+        assert resolve_post_profile("os_mine", None) == "os_mine"
 
     def test_ignores_a_profile_supplied_by_the_caller(self):
-        assert app_module.resolve_post_profile("os_mine", OTHER_TENANT) == "os_mine"
+        assert resolve_post_profile("os_mine", OTHER_TENANT) == "os_mine"
 
     def test_refuses_instead_of_falling_back_to_the_caller_value(self):
         # The whole point: no server profile must NOT mean "use theirs".
         with pytest.raises(HTTPException) as exc:
-            app_module.resolve_post_profile(None, OTHER_TENANT)
+            resolve_post_profile(None, OTHER_TENANT)
         assert exc.value.status_code == 503
 
     @pytest.mark.parametrize("empty", [None, ""])
     def test_empty_server_profile_is_also_refused(self, empty):
         with pytest.raises(HTTPException):
-            app_module.resolve_post_profile(empty, OTHER_TENANT)
+            resolve_post_profile(empty, OTHER_TENANT)
 
 
 class TestResolvePostProfileSelfHosted:
@@ -56,14 +58,14 @@ class TestResolvePostProfileSelfHosted:
 
     @pytest.fixture(autouse=True)
     def _self_host(self, monkeypatch):
-        monkeypatch.setattr(app_module, "BILLING_ENABLED", False)
+        monkeypatch.setattr(state_module, "BILLING_ENABLED", False)
 
     def test_client_profile_is_honoured(self):
-        assert app_module.resolve_post_profile(None, "my-profile") == "my-profile"
+        assert resolve_post_profile(None, "my-profile") == "my-profile"
 
     def test_missing_profile_is_a_client_error(self):
         with pytest.raises(HTTPException) as exc:
-            app_module.resolve_post_profile(None, None)
+            resolve_post_profile(None, None)
         assert exc.value.status_code == 400
 
 
@@ -81,8 +83,8 @@ class TestScheduledPostsAreFilteredByProfile:
         async def fake_get(api_key, url, params):
             return vendor_rows
 
-        monkeypatch.setattr(app_module, "_upload_post_get", fake_get)
-        rows = asyncio.run(app_module._scheduled_posts_for("key", "os_mine"))
+        monkeypatch.setattr(social_routes, "_upload_post_get", fake_get)
+        rows = asyncio.run(social_routes._scheduled_posts_for("key", "os_mine"))
 
         assert [r["job_id"] for r in rows] == ["mine-1", "mine-2"]
         assert all(r.get("profile_username") == "os_mine" for r in rows)
