@@ -32,6 +32,7 @@ ALLOWED_ENV = {
     "GEMINI_MODEL",
     "AI_PROVIDER",
     "NEMO_ASR_URL",
+    "NEMO_ASR_API_KEY",
     "AI_BASE_URL",
     "AI_API_KEY",
     "AI_MODEL",
@@ -67,7 +68,7 @@ VALID_CHOICES = {
 }
 
 # Keys whose values are secrets — returned masked on GET, never logged
-SECRET_KEYS = {"OPENROUTER_API_KEY", "GEMINI_API_KEY", "AI_API_KEY"}
+SECRET_KEYS = {"OPENROUTER_API_KEY", "GEMINI_API_KEY", "AI_API_KEY", "NEMO_ASR_API_KEY"}
 
 def _mask(value: str) -> str:
     if not value:

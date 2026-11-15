@@ -79,6 +79,7 @@ const PROVIDER_CARDS = {
 const ALL_FIELDS = [
   ...GROUPS.flatMap(g => g.fields),
   ...Object.values(PROVIDER_CARDS).flatMap(c => c.fields),
+  { key: 'NEMO_ASR_API_KEY', label: 'API Key', placeholder: 'sk-...', secret: true },
 ];
 
 const isSecretKey = (k) => ALL_FIELDS.some(f => f.key === k && f.secret);
@@ -168,7 +169,7 @@ function ColabGuide() {
 // The .ipynb is a static asset in dashboard/public.
 const PARAKEET_NOTEBOOK_URL = `${import.meta.env.BASE_URL}parakeet_asr_colab.ipynb`;
 
-function TranscriptionModels({ asrUrl, onAsrUrlChange }) {
+function TranscriptionModels({ asrUrl, onAsrUrlChange, apiKeyField }) {
   const [guideOpen, setGuideOpen] = useState(false);
   const [mode, setMode] = useState(asrUrl ? 'cloud' : 'local');
   const [models, setModels] = useState(null);
@@ -267,8 +268,8 @@ function TranscriptionModels({ asrUrl, onAsrUrlChange }) {
       <div className="max-w-md mb-3">
         <SegmentedControl
           options={[
-            { value: 'local', label: 'local gpu', icon: Cpu, hint: 'this machine' },
-            { value: 'cloud', label: 'colab cloud', icon: Cloud, hint: 'free T4' },
+            { value: 'local', label: 'local gpu', icon: <Cpu size={18} />, hint: 'this machine' },
+            { value: 'cloud', label: 'colab cloud', icon: <Cloud size={18} />, hint: 'free T4' },
           ]}
           value={mode}
           onChange={switchMode}
@@ -313,6 +314,7 @@ function TranscriptionModels({ asrUrl, onAsrUrlChange }) {
               className="input-field mt-1.5 font-mono text-sm"
             />
           </label>
+          {apiKeyField}
         </div>
       )}
 
@@ -322,7 +324,9 @@ function TranscriptionModels({ asrUrl, onAsrUrlChange }) {
             ? 'Model downloads serve the local fallback — switch the toggle to local GPU to use them.'
             : 'Active model below; jobs pull any non-downloaded model automatically.'}
         </p>
-        {models.map(m => {
+        {models === null
+          ? <p className="text-xs text-muted">{err ? 'model list unavailable' : 'loading models…'}</p>
+          : models.map(m => {
           const isActive = active === m.alias || (m.aliases || []).includes(active);
           return (
             <div key={m.alias} className={`flex items-center justify-between gap-3 p-2 rounded-input ${isActive ? 'bg-paper3' : ''}`}>
@@ -573,6 +577,7 @@ export default function EnvSettings() {
         <TranscriptionModels
           asrUrl={draft['NEMO_ASR_URL'] ?? ''}
           onAsrUrlChange={(v) => setField('NEMO_ASR_URL', v)}
+          apiKeyField={<EnvField {...fieldProps({ key: 'NEMO_ASR_API_KEY', label: 'API Key', placeholder: 'sk-...', secret: true })} />}
         />
 
         {GROUPS.map(group => (

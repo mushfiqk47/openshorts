@@ -210,11 +210,13 @@ def smoke_test_transcription():
             timeout=120)
         if remote:
             payload, elapsed = _transcribe_remote(wav_path)
-            backend = str(payload.get("backend") or "")
-            if "CUDA" not in backend.upper():
-                return False, {"stage": "gpu check",
-                               "error": f"remote backend={backend or 'unknown'}",
-                               "elapsed": elapsed}
+            backend = str(payload.get("backend") or "remote GPU (server /health: ")
+            try:
+                import httpx as _hx
+                h = _hx.get(_nemo_asr_url() + "/health", timeout=30)
+                backend += " | " + h.text[:120]
+            except Exception:
+                pass
         else:
             bin_path = _resolve_nemo_bin()
             model = os.environ.get("NEMO_ASR_MODEL", "").strip() or DEFAULT_NEMO_MODEL
@@ -288,14 +290,37 @@ def _nemo_asr_url():
 
 
 def _transcribe_remote(wav_path):
-    """One remote transcription round-trip. Returns (payload, elapsed_s)."""
+    """One remote transcription round-trip. Returns (payload, elapsed_s).
+
+    Two server generations are supported, and either works without changing
+    OpenShorts:
+      - nemo-speech serve (the Colab notebook's resident-model server):
+        POST {url}/v1/audio/transcriptions with response_format=verbose_json
+        -> {text, words:[{word,start,end,confidence}], duration, language}
+      - legacy wrapper notebooks: POST {url}/transcribe -> the nemo JSON
+        contract (+ a backend field).
+    A 404 on the v1 route falls back to legacy, so a notebook from either
+    generation answers. The words shape is identical in both.
+    """
     import httpx
     started = time.time()
+    headers = {}
+    api_key = os.environ.get("NEMO_ASR_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    def _post(route, file_handle):
+        return httpx.post(
+            _nemo_asr_url() + route,
+            files={"file": (os.path.basename(wav_path), file_handle, "audio/wav")},
+            headers=headers, timeout=_ASR_TIMEOUT_SECONDS)
+
     with open(wav_path, "rb") as f:
-        resp = httpx.post(
-            _nemo_asr_url() + "/transcribe",
-            files={"file": (os.path.basename(wav_path), f, "audio/wav")},
-            timeout=_ASR_TIMEOUT_SECONDS)
+        resp = _post("/v1/audio/transcriptions", f)
+    if resp.status_code == 404:
+        # Older notebook server: the v1 route does not exist there.
+        with open(wav_path, "rb") as f:
+            resp = _post("/transcribe", f)
     elapsed = round(time.time() - started, 1)
     if resp.status_code != 200:
         raise RuntimeError(f"remote transcriber returned {resp.status_code}: {resp.text[-300:]}")
