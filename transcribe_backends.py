@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 import threading
 import time
 
@@ -139,6 +140,103 @@ def reset_runtime_cache():
     _resolved_bin = None
 
 
+def _nemo_cache_root():
+    """Where the nemo-speech runtime stores downloaded models.
+
+    Matches model_store.cpp's cache_root(): NEMO_SPEECH_MODEL_DIR wins, then
+    the Windows installer location, then the POSIX default.
+    """
+    env_dir = os.environ.get("NEMO_SPEECH_MODEL_DIR", "").strip()
+    if env_dir:
+        return Path(env_dir)
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local and (Path(local) / "NeMoSpeech" / "models").is_dir():
+        return Path(local) / "NeMoSpeech" / "models"
+    return Path.home() / ".cache" / "nemo-speech" / "models"
+
+
+def ensure_model_cached(model=None):
+    """Make sure the configured ASR model is downloaded, pulling if needed.
+
+    `nemo-speech pull` is idempotent: instant (prints the local path) when the
+    model is cached, a full sha256-verified download when it is not. Running
+    it before every transcription is what makes "next time it just works"
+    true — a fresh machine or a new alias self-provisions instead of failing
+    deep inside transcribe. Not gated by _ASR_GATE: downloading is network
+    work, not GPU work.
+
+    Returns (ok, detail) where detail is the local path on success or the
+    failing output tail.
+    """
+    bin_path = _resolve_nemo_bin()
+    model = model or os.environ.get("NEMO_ASR_MODEL", "").strip() or DEFAULT_NEMO_MODEL
+    print(f"🎙️ Ensuring ASR model '{model}' is downloaded (first run downloads it)…", flush=True)
+    try:
+        proc = subprocess.run(
+            [bin_path, "pull", model], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=_ASR_TIMEOUT_SECONDS)
+    except Exception as e:
+        return False, f"nemo-speech pull failed: {e}"
+    if proc.returncode != 0:
+        tail = ((proc.stderr or "") or (proc.stdout or ""))[-_STDERR_TAIL_CHARS:].strip()
+        return False, f"nemo-speech pull failed ({proc.returncode}): {tail}"
+    detail = ((proc.stdout or "").strip().splitlines() or ["cached"])[-1]
+    return True, detail
+
+
+def smoke_test_transcription():
+    """End-to-end runtime check: binary + model + CUDA + a real decode.
+
+    Generates a 2-second test tone with ffmpeg, transcribes it through the
+    same CLI path real jobs use, and requires the CUDA backend line in the
+    session output. No speech is expected from a tone — the point is that the
+    whole GPU chain runs. Returns (ok, detail_dict) for the API/UI.
+    """
+    ok, detail = ensure_model_cached()
+    if not ok:
+        return False, {"stage": "model download", "error": detail}
+
+    fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="asr_smoke_")
+    os.close(fd)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+             "-i", "sine=frequency=440:duration=2", "-ar", "16000",
+             "-ac", "1", "-c:a", "pcm_s16le", wav_path],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=120)
+        bin_path = _resolve_nemo_bin()
+        model = os.environ.get("NEMO_ASR_MODEL", "").strip() or DEFAULT_NEMO_MODEL
+        started = time.time()
+        proc = subprocess.run(
+            [bin_path, "transcribe", wav_path, "--model", model, "--format", "json"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=_ASR_TIMEOUT_SECONDS)
+        elapsed = round(time.time() - started, 1)
+        if proc.returncode != 0:
+            tail = (proc.stderr or "")[-_STDERR_TAIL_CHARS:].strip()
+            return False, {"stage": "transcribe", "error": tail, "elapsed": elapsed}
+        backend = "CUDA" if "backend=CUDA" in (proc.stderr or "") else None
+        if not backend:
+            return False, {"stage": "gpu check",
+                           "error": "runtime did not report a CUDA backend",
+                           "elapsed": elapsed}
+        payload = json.loads(proc.stdout or "{}")
+        return True, {
+            "backend": backend,
+            "model": model,
+            "duration_s": payload.get("duration"),
+            "elapsed": elapsed,
+        }
+    except Exception as e:
+        return False, {"stage": "smoke test", "error": str(e)}
+    finally:
+        try:
+            os.remove(wav_path)
+        except OSError:
+            pass
+
+
 def _extract_wav(media_path):
     """nemo-speech reads PCM wav; ffmpeg-extract 16kHz mono to a temp file."""
     fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="asr_")
@@ -170,6 +268,11 @@ def _require_cuda(stderr):
 def _transcribe_with_nemo(media_path):
     bin_path = _resolve_nemo_bin()
     model = os.environ.get("NEMO_ASR_MODEL", "").strip() or DEFAULT_NEMO_MODEL
+    # Self-provisioning: a fresh machine or a new alias downloads its model
+    # here instead of failing deep inside transcribe.
+    ensure_ok, ensure_detail = ensure_model_cached(model)
+    if not ensure_ok:
+        raise RuntimeError(f"ASR model '{model}' unavailable: {ensure_detail}")
     wav_path = _extract_wav(media_path)
     try:
         cmd = [bin_path, "transcribe", wav_path, "--model", model, "--format", "json"]

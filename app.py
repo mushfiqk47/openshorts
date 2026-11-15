@@ -1556,6 +1556,115 @@ class AITestBody(BaseModel):
     updates: Dict[str, str] = {}
 
 
+# ---- Transcription models (nemo-speech runtime) -----------------------------
+# The dashboard's transcription card drives these: list what the runtime
+# offers, download a model, and smoke-test the whole GPU chain.
+_asr_job_state = {"running": False, "kind": None, "model": None,
+                  "ok": None, "detail": "", "started": None}
+_asr_job_lock = threading.Lock()
+
+
+def _asr_list_models():
+    """ASR models the runtime offers + whether each is already downloaded."""
+    from transcribe_backends import _resolve_nemo_bin, _nemo_cache_root
+    proc = subprocess.run(
+        [_resolve_nemo_bin(), "model", "list", "--json"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "model list failed").strip()[-300:])
+    data = json.loads(proc.stdout)
+    cache_root = _nemo_cache_root()
+    out = []
+    for m in data.get("models", []):
+        if "asr" not in (m.get("roles") or []):
+            continue
+        rev_dir = cache_root / str(m.get("repo")) / str(m.get("revision") or "")
+        out.append({
+            "alias": (m.get("aliases") or [m.get("repo")])[0],
+            "aliases": m.get("aliases") or [],
+            "repo": m.get("repo"),
+            "license_url": m.get("license_url"),
+            "cached": rev_dir.is_dir(),
+        })
+    return out
+
+
+def _asr_run_job(kind, model):
+    """Background worker for download / smoke-test — one at a time."""
+    from transcribe_backends import ensure_model_cached, smoke_test_transcription
+    try:
+        if kind == "download":
+            ok, detail = ensure_model_cached(model)
+            _asr_job_state["detail"] = detail
+        else:
+            ok, info = smoke_test_transcription()
+            _asr_job_state["detail"] = info if isinstance(info, str) else json.dumps(info)
+        _asr_job_state["ok"] = bool(ok)
+    except Exception as e:
+        _asr_job_state["ok"] = False
+        _asr_job_state["detail"] = str(e)
+    finally:
+        _asr_job_state["running"] = False
+        _asr_job_state["finished"] = datetime.now(timezone.utc).isoformat()
+
+
+class ASRActionBody(BaseModel):
+    model: Optional[str] = None
+
+
+@app.get("/api/asr/models")
+async def get_asr_models():
+    from transcribe_backends import DEFAULT_NEMO_MODEL
+    try:
+        models = _asr_list_models()
+        active = (os.environ.get("NEMO_ASR_MODEL") or "").strip() or DEFAULT_NEMO_MODEL
+        return {"ok": True, "models": models, "active": active,
+                "job": {k: v for k, v in _asr_job_state.items() if k != "kind"}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/asr/download")
+async def download_asr_model(body: ASRActionBody):
+    """Download (pull) an ASR model. Single-flight: one job at a time."""
+    from transcribe_backends import DEFAULT_NEMO_MODEL
+    model = (body.model or "").strip() or (os.environ.get("NEMO_ASR_MODEL") or "").strip() or DEFAULT_NEMO_MODEL
+    with _asr_job_lock:
+        if _asr_job_state["running"]:
+            raise HTTPException(status_code=409, detail="A transcription job (download or test) is already running")
+        _asr_job_state.update(running=True, kind="download", model=model,
+                              ok=None, detail="", started=datetime.now(timezone.utc).isoformat(),
+                              finished=None)
+    threading.Thread(target=_asr_run_job, args=("download", model), daemon=True).start()
+    return {"ok": True, "model": model}
+
+
+@app.post("/api/asr/smoke-test")
+async def smoke_test_asr():
+    """Run the full GPU transcription chain against a generated test tone."""
+    with _asr_job_lock:
+        if _asr_job_state["running"]:
+            raise HTTPException(status_code=409, detail="A transcription job (download or test) is already running")
+        _asr_job_state.update(running=True, kind="smoke-test", model=None,
+                              ok=None, detail="", started=datetime.now(timezone.utc).isoformat(),
+                              finished=None)
+    threading.Thread(target=_asr_run_job, args=("smoke-test", None), daemon=True).start()
+    return {"ok": True}
+
+
+@app.get("/api/asr/status")
+async def get_asr_job_status():
+    return {k: v for k, v in _asr_job_state.items() if k != "kind"}
+
+
+class AITestBody(BaseModel):
+    # Draft values from the settings form, so the button tests what the user
+    # typed before it is saved. Keys must be in ALLOWED_ENV; anything missing
+    # falls back to the live .env values.
+    updates: Dict[str, str] = {}
+
+
 @app.post("/api/ai/test")
 async def test_ai_connection(body: AITestBody):
     """Ping the configured AI provider with a tiny completion.

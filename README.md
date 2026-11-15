@@ -246,6 +246,31 @@ except clipping). On a plain CPU host, drop the `GPU=1` prefix.
 ### Open the dashboard
 Navigate to **`http://localhost:5175`**
 
+### From zero to your first clip (end to end)
+
+1. **`setup.bat`** does all of this automatically: checks Python 3.11+ /
+   Node 18+ / FFmpeg / the NVIDIA driver, installs the NeMo-Speech.cpp
+   runtime, downloads the Parakeet ASR model (714 MB, once), installs Python
+   deps plus the CUDA torch build, creates `.env`, and runs a transcription
+   smoke test that proves binary + model + CUDA decode before you do
+   anything.
+2. **`run.bat`** starts the backend (:8000) and frontend (:5175), health
+   checks both, and opens the browser.
+3. **Settings**:
+   - paste an API key (Gemini or OpenRouter free models) or set
+     **AI Provider** to `custom` (your own endpoint) / `ollama` (local model)
+   - the **transcription models** card lists what the runtime offers:
+     download other aliases there, and hit **test transcription** any time to
+     re-verify the GPU chain without uploading a video
+4. **Clip Generator**: upload a video, hit **generate clips**. Transcription,
+   viral-moment selection, GPU reframing and word-timed karaoke subtitles all
+   run automatically; clips land in `output/<job>/` and stream from the app.
+5. **Publish** (optional): connect TikTok / Instagram / YouTube in Settings
+   via Upload-Post and post from any result card.
+
+Trouble at any step? The troubleshooting table below covers the common
+failures, and the backend window prints the exact stage that failed.
+
 1. Go to **Settings** and enter your API keys (Gemini, fal.ai, ElevenLabs, Upload-Post)
 2. **Clip Generator**: Upload a long-form video to generate viral shorts
 3. **AI Shorts**: Describe your product or paste a URL to generate UGC marketing videos

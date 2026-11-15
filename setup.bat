@@ -158,6 +158,16 @@ if errorlevel 1 (
   exit /b 1
 )
 echo   backend imports OK
+echo   Transcription smoke test: binary + model + CUDA, decoding a test tone...
+python -c "import transcribe_backends as tb; ok, d = tb.smoke_test_transcription(); print('SMOKE:', 'PASS' if ok else 'FAIL'); print('SMOKE_DETAIL:', d)" > "%TEMP%\os_smoke.txt" 2>&1
+findstr /c:"SMOKE: PASS" "%TEMP%\os_smoke.txt" >nul
+if errorlevel 1 (
+  type "%TEMP%\os_smoke.txt"
+  echo [WARN] transcription smoke test FAILED - read the lines above. The app
+  echo   still starts, but jobs will fail until this passes.
+) else (
+  echo   Transcription chain verified: model + CUDA decode
+)
 echo.
 echo ==================================================
 echo  Setup complete.

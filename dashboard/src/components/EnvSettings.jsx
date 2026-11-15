@@ -158,6 +158,110 @@ function ColabGuide() {
   );
 }
 
+
+// Transcription models: drives the nemo-speech runtime (list / download /
+// smoke test). Independent of the AI analysis provider above — this is the
+// ASR (parakeet) side of the pipeline.
+function TranscriptionModels() {
+  const [models, setModels] = useState(null);
+  const [active, setActive] = useState('');
+  const [job, setJob] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const load = async () => {
+    try {
+      const res = await fetch(getApiUrl('/api/asr/models'));
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setModels(data.models);
+      setActive(data.active);
+      setJob(data.job);
+      setErr(null);
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(async () => {
+      try {
+        const s = await (await fetch(getApiUrl('/api/asr/status'))).json();
+        setJob(s);
+        if (!s.running) load();
+      } catch { /* ignore poll errors */ }
+    }, 2500);
+    return () => clearInterval(timer);
+  }, []);
+
+  const act = async (path, body) => {
+    setErr(null);
+    try {
+      const res = await fetch(getApiUrl(path), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setTimeout(load, 400);
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+
+  const running = job?.running;
+
+  return (
+    <div className="mt-6">
+      <h3 className="text-sm font-medium text-ink lowercase">transcription models</h3>
+      <p className="text-xs text-muted mb-3">The ASR brain (NeMo-Speech.cpp on CUDA). Download a model here or let the first job pull it automatically; the smoke test proves the whole GPU chain before you upload anything.</p>
+      {err && <p className="text-xs text-warn mb-2">{err}</p>}
+      {!models ? (
+        <p className="text-xs text-muted flex items-center gap-2"><RefreshCw size={12} className="animate-spin" /> reading the runtime…</p>
+      ) : (
+        <div className="border border-rule rounded-card bg-paper2 p-4 space-y-2">
+          {models.map(m => {
+            const isActive = active === m.alias || (m.aliases || []).includes(active);
+            return (
+              <div key={m.alias} className={`flex items-center justify-between gap-3 p-2 rounded-input ${isActive ? 'bg-paper3' : ''}`}>
+                <div className="min-w-0">
+                  <span className="text-sm text-ink font-mono">{m.alias}</span>
+                  {isActive && <span className="readout ml-2">active</span>}
+                  <span className={`ml-2 text-[11px] ${m.cached ? 'text-ok' : 'text-muted'}`}>{m.cached ? '• downloaded' : '• not downloaded'}</span>
+                </div>
+                <button
+                  onClick={() => act('/api/asr/download', { model: m.alias })}
+                  disabled={running || m.cached}
+                  className="btn-quiet py-1.5 px-3 text-xs disabled:opacity-50 shrink-0"
+                  title={m.cached ? 'Already downloaded' : 'Download from Hugging Face (sha256 verified)'}
+                >
+                  {m.cached ? 'downloaded' : 'download'}
+                </button>
+              </div>
+            );
+          })}
+          <div className="pt-2 border-t border-rule flex items-center justify-between gap-3">
+            <span className="text-xs text-muted">
+              {running
+                ? `working: ${job?.model || 'smoke test'}…`
+                : job?.ok === true
+                  ? 'last check passed'
+                  : job?.ok === false
+                    ? <span className="text-warn">last check failed: {String(job?.detail || '').slice(0, 120)}</span>
+                    : 'run the smoke test to verify the GPU chain'}
+            </span>
+            <button onClick={() => act('/api/asr/smoke-test')} disabled={running} className="btn-primary py-1.5 px-3 text-xs disabled:opacity-50 shrink-0">
+              {running ? 'working…' : 'test transcription'}
+            </button>
+          </div>
+          {job?.detail && !running && job?.ok === true && (
+            <p className="text-[11px] font-mono text-muted break-all">{String(job.detail).slice(0, 200)}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function EnvSettings() {
   const [env, setEnv] = useState(null);
   const [secretsSet, setSecretsSet] = useState({});
@@ -362,6 +466,8 @@ export default function EnvSettings() {
             )}
           </div>
         </div>
+
+        <TranscriptionModels />
 
         {GROUPS.map(group => (
           <div key={group.title} className="mt-6">
